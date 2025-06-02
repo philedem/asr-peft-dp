@@ -1,0 +1,36 @@
+# Core web/backend
+fastapi
+uvicorn[standard]
+pydub
+python-multipart
+
+# CORS for development
+starlette
+
+# Machine Learning
+torch
+torchaudio
+transformers
+datasets
+jiwer
+mlflow
+optuna
+
+# LoRA / Parameter-Efficient Fine-Tuning
+peft
+
+# Differential privacy
+opacus
+
+# HuggingFace Whisper
+# (Installed via transformers, but you can optionally specify openai-whisper if you want vanilla Whisper)
+# openai-whisper
+
+# For handling HTTP requests in LoRA training script
+requests
+
+# Audio
+soundfile
+
+# (Optional: for robust numerical stuff)
+numpy
