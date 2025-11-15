@@ -20,21 +20,53 @@ import numpy as np
 from itertools import product
 from pathlib import Path
 
-MODEL_NAME      = "NbAiLab/nb-whisper-tiny"
-DEVICE          = "mps" if torch.backends.mps.is_available() else "cpu"
+MODEL_NAME      = "NbAiLab/nb-whisper-medium"
+
+# Device detection: prioritize CUDA > MPS > CPU (can override with DEVICE env var)
+DEVICE = os.getenv("DEVICE")
+if DEVICE:
+    print(f"Using device from environment: {DEVICE}")
+else:
+    if torch.cuda.is_available():
+        DEVICE = "cuda"
+    elif torch.backends.mps.is_available():
+        DEVICE = "mps"
+    else:
+        DEVICE = "cpu"
+    print(f"Auto-detected device: {DEVICE}")
+
 RECORD_DIR      = "data/records"
 AUDIO_DIR       = "data/audio"
 ADAPTER_OUT_DIR = "data/lora_output"
 
 BATCH_SIZE      = 4
-EPOCHS          = 4 
-MAX_GRAD_NORM  = 1.0
+EPOCHS          = 3
+MAX_GRAD_NORM   = 1.0
 
-lrs            = [5e-5, 7.5e-5, 1e-4]
-target_epsilons= [3.0, 6.0]
-lora_rs        = [4, 8]
-lora_alphas    = [16, 32]
-lora_dropouts  = [0.05, 0.1]
+# Best-practice hyperparameters for production (grid search moved to separate script)
+LEARNING_RATE   = 5e-5
+TARGET_EPSILON  = 5.0
+TARGET_DELTA    = 1e-5
+LORA_R          = 8
+LORA_ALPHA      = 32
+LORA_DROPOUT    = 0.05
+
+# Set to True to run hyperparameter search (for research/tuning only)
+RUN_GRID_SEARCH = os.getenv("RUN_GRID_SEARCH", "false").lower() == "true"
+
+# Grid search parameters (only used if RUN_GRID_SEARCH=True)
+if RUN_GRID_SEARCH:
+    lrs            = [5e-5, 7.5e-5, 1e-4]
+    target_epsilons= [3.0, 6.0]
+    lora_rs        = [4, 8]
+    lora_alphas    = [16, 32]
+    lora_dropouts  = [0.05, 0.1]
+else:
+    lrs            = [LEARNING_RATE]
+    target_epsilons= [TARGET_EPSILON]
+    lora_rs        = [LORA_R]
+    lora_alphas    = [LORA_ALPHA]
+    lora_dropouts  = [LORA_DROPOUT]
 
 def collate_fn(batch, processor, bos_id):
     input_features = [{"input_features": b["input_features"]} for b in batch]
@@ -179,10 +211,18 @@ train_loader = DataLoader(
 )
 
 for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
+    # Clean up previous model to free memory
+    if i > 1:
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        
     base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
 
-    run_name = f"gs_{i:02d}_lr{lr}_eps{eps}_r{r}_a{alpha}_d{dropout}"
-    adapter_dir = Path(ADAPTER_OUT_DIR) / run_name
+    run_name = f"run_{i:02d}_lr{lr}_eps{eps}_r{r}_a{alpha}_d{dropout}" if RUN_GRID_SEARCH else "lora_adapter"
+    adapter_dir = Path(ADAPTER_OUT_DIR) / run_name if RUN_GRID_SEARCH else Path(ADAPTER_OUT_DIR)
     adapter_dir.mkdir(parents=True, exist_ok=True)
 
     lora_cfg = LoraConfig(
@@ -225,8 +265,15 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
         mlflow.log_metric("WER", wer)
         mlflow.log_artifacts(adapter_dir, artifact_path="lora_adapter")
 
-        # ---- ping backend to hot-reload ----
-        # try:
-        #     requests.post("http://localhost:8000/asr/reload_adapter", timeout=3)
-        # except Exception as e:
-        #     print("reload ping failed:", e)
+        # Ping backend to hot-reload the adapter
+        try:
+            backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+            requests.post(f"{backend_url}/asr/reload_adapter", timeout=5)
+            print("Successfully notified backend to reload adapter")
+        except Exception as e:
+            print(f"Warning: Could not reload adapter in backend: {e}")
+
+print("\n✓ Training complete!")
+if not RUN_GRID_SEARCH:
+    print(f"Adapter saved to: {ADAPTER_OUT_DIR}")
+    print("Backend has been notified to reload the model.")

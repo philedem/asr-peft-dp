@@ -2,118 +2,257 @@
   import { onMount } from 'svelte';
   import { fly }     from 'svelte/transition';
 
+  const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
+  const WER_POLL_INTERVAL = import.meta.env.VITE_WER_POLL_INTERVAL || 70000;
+
   let records:any[] = [];
   let loading=false, err='';
   let notification='', notifType='success', showNotif=false;
   let manual:Record<string,string>={}, reviewed:Record<string,boolean>={}, saving:Record<string,boolean>={};
   let wer='';
   let isRecording=false, chunks:Blob[]=[], recorder:MediaRecorder|null=null;
+  let uploadProgress=false;
+  let trainingInProgress=false;
 
   const toast=(m:string,t='success')=>{
     notification=m; notifType=t; showNotif=true;
-    setTimeout(()=>showNotif=false,2300);
+    setTimeout(()=>showNotif=false,3000);
   };
 
   // ------- API helpers ------------
-  const getJSON = (u:string)=>fetch(u).then(r=>r.json());
-  const post    = (u:string,body:any)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const getJSON = async (u:string)=>{
+    try {
+      const response = await fetch(u);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch(e) {
+      toast(`API Error: ${e}`, 'error');
+      throw e;
+    }
+  };
+  const post = async (u:string,body:any)=>{
+    try {
+      const response = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch(e) {
+      toast(`API Error: ${e}`, 'error');
+      throw e;
+    }
+  };
 
-  async function fetchWER(){ wer=(await getJSON('http://localhost:8000/asr/wer')).wer||''; }
+  async function fetchWER(){ 
+    try {
+      const data = await getJSON(`${BACKEND_URL}/asr/wer`);
+      wer = data.wer || 'Not calculated yet';
+    } catch(e) {
+      console.error('Failed to fetch WER:', e);
+    }
+  }
   async function load(){
     loading=true; err='';
     try{
-      records=await getJSON('http://localhost:8000/asr/records');
+      records=await getJSON(`${BACKEND_URL}/asr/records`);
       records.sort((a,b)=>(b.timestamp??'').localeCompare(a.timestamp??''));
       manual={}; reviewed={};
       records.forEach(r=>{
         manual[r.audio_file] = r.manual_transcript?.length ? r.manual_transcript : r.asr_transcript || '';
         reviewed[r.audio_file] = !!(r.manual_transcript && r.manual_transcript.length > 0);
       });
-    }catch(e){err='could not load';}
+    }catch(e){
+      err='Could not load records. Is the backend running?';
+      console.error(e);
+    }
     loading=false;
   }
 
   async function save(r){
+    if (saving[r.audio_file]) return;
     saving[r.audio_file]=true;
-    await post('http://localhost:8000/asr/save_record',{
-      audio_id:r.audio_file,
-      asr_transcript:r.asr_transcript,
-      manual_transcript:manual[r.audio_file],
-      flagged:r.flagged
-    });
-    reviewed[r.audio_file] = !!(r.manual_transcript && r.manual_transcript.length > 0);
-    toast('saved'); await load(); await fetchWER();
-    saving[r.audio_file]=false;
+    try {
+      await post(`${BACKEND_URL}/asr/save_record`,{
+        audio_id:r.audio_file,
+        asr_transcript:r.asr_transcript,
+        manual_transcript:manual[r.audio_file],
+      });
+      reviewed[r.audio_file] = !!(manual[r.audio_file] && manual[r.audio_file].length > 0);
+      toast('Saved successfully'); 
+      await load(); 
+      await fetchWER();
+    } catch(e) {
+      toast('Save failed', 'error');
+    } finally {
+      saving[r.audio_file]=false;
+    }
   }
 
   // ---------- recording ----------
   async function toggleRec(){
     if(!isRecording){
-      chunks=[]; isRecording=true;
-      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
-      recorder=new MediaRecorder(stream);
-      recorder.ondataavailable=e=>chunks.push(e.data);
-      recorder.onstop=async ()=>{
+      try {
+        chunks=[]; isRecording=true;
+        const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+        recorder=new MediaRecorder(stream);
+        recorder.ondataavailable=e=>chunks.push(e.data);
+        recorder.onstop=async ()=>{
+          isRecording=false;
+          await sendToASR(new Blob(chunks,{type:'audio/webm'}));
+        };
+        recorder.start();
+        toast('Recording started...');
+      } catch(e) {
+        toast('Microphone access denied', 'error');
         isRecording=false;
-        await sendToASR(new Blob(chunks,{type:'audio/webm'}));
-      };
-      recorder.start();
-    }else recorder?.stop();
+      }
+    }else {
+      recorder?.stop();
+      toast('Recording stopped');
+    }
   }
+  
   async function sendToASR(blob:Blob){
-    const fd=new FormData(); fd.append('audio',blob,'record.webm');
-    toast('sending...');
-    const r=await fetch('http://localhost:8000/asr/transcribe',{method:'POST',body:fd});
-    r.ok?toast('done'):toast('ASR fail','error');
-    await load(); await fetchWER();
+    uploadProgress=true;
+    try {
+      const fd=new FormData(); 
+      fd.append('audio',blob,'record.webm');
+      toast('Processing audio...');
+      const r=await fetch(`${BACKEND_URL}/asr/transcribe`,{method:'POST',body:fd});
+      if (r.ok) {
+        const result = await r.json();
+        toast(`✓ Created ${result.created} transcription(s)`);
+      } else {
+        const errorData = await r.json().catch(() => ({ error: 'Unknown error' }));
+        toast(`Transcription failed: ${errorData.error}`, 'error');
+      }
+      await load(); 
+      await fetchWER();
+    } catch(e) {
+      toast('Upload/transcription failed', 'error');
+      console.error(e);
+    } finally {
+      uploadProgress=false;
+    }
   }
-  const approve=r=>{ manual[r.audio_file]=r.asr_transcript; save(r); };
+  
+  const approve=async (r)=>{ 
+    manual[r.audio_file]=r.asr_transcript; 
+    await save(r); 
+  };
 
-  onMount(()=>{ load(); fetchWER(); setInterval(fetchWER,70000); });
+  async function triggerManualRetrain() {
+    if (trainingInProgress) return;
+    trainingInProgress = true;
+    toast('Starting training... This may take several minutes.');
+    try {
+      await getJSON(`${BACKEND_URL}/train/retrain_lora`);
+      toast('Training started in background');
+    } catch(e) {
+      toast('Failed to start training', 'error');
+    } finally {
+      trainingInProgress = false;
+    }
+  }
+
+  onMount(()=>{ 
+    load(); 
+    fetchWER(); 
+    setInterval(fetchWER, WER_POLL_INTERVAL); 
+  });
 
   const fmt=t=>t?.replace('T',' ').replace('Z','').slice(0,19);
 </script>
 
-<h1>ASR Annotation Table</h1>
+<h1>ASR Annotation System</h1>
+<p class="subtitle">Transcription & Model Training</p>
 
-<div class="audio-section">
-  <button class="button" on:click={toggleRec}>{isRecording?'Stop':'Start'} Recording</button>
-  <input type="file" accept="audio/*" on:change={e=>sendToASR(e.target.files[0])}/>
-</div>
+<div class="control-panel">
+  <div class="audio-section">
+    <h3>Audio Input</h3>
+    <button class="button record-btn" class:recording={isRecording} on:click={toggleRec} disabled={uploadProgress}>
+      {isRecording ? '⏹ Stop Recording' : '🎤 Start Recording'}
+    </button>
+    <label class="button upload-btn">
+      📁 Upload Audio
+      <input type="file" accept="audio/*" style="display:none" on:change={e=>sendToASR(e.target.files[0])} disabled={uploadProgress}/>
+    </label>
+    {#if uploadProgress}
+      <span class="status-indicator">⏳ Processing...</span>
+    {/if}
+  </div>
 
-<div class="current-wer">
-  <strong>Current WER:</strong> {wer||'—'}
+  <div class="stats-section">
+    <div class="stat-card">
+      <strong>Current WER</strong>
+      <div class="stat-value">{wer || '—'}</div>
+    </div>
+    <div class="stat-card">
+      <strong>Total Records</strong>
+      <div class="stat-value">{records.length}</div>
+    </div>
+    <div class="stat-card">
+      <strong>Reviewed</strong>
+      <div class="stat-value">{Object.values(reviewed).filter(Boolean).length}</div>
+    </div>
+  </div>
+
+  <div class="training-section">
+    <button class="button train-btn" on:click={triggerManualRetrain} disabled={trainingInProgress}>
+      {trainingInProgress ? '⏳ Training...' : '🔄 Manual Retrain'}
+    </button>
+    <small>Auto-retrains after 20 corrections</small>
+  </div>
 </div>
 
 {#if loading}
-  <p>Loading records...</p>
+  <div class="loading-state">
+    <div class="spinner"></div>
+    <p>Loading records...</p>
+  </div>
 {:else if err}
-  <p style="color:#e74c3c">{err}</p>
+  <div class="error-state">
+    <p style="color:#e74c3c">❌ {err}</p>
+    <button class="button" on:click={load}>Retry</button>
+  </div>
+{:else if records.length === 0}
+  <div class="empty-state">
+    <p>📭 No records yet. Upload or record audio to get started!</p>
+  </div>
 {:else}
   <div style="overflow-x:auto">
     <table>
       <thead><tr>
-        <th>Time</th><th>Audio</th><th>Transcript</th><th></th>
+        <th>Time</th>
+        <th>Audio</th>
+        <th>Transcript</th>
+        <th>Status</th>
       </tr></thead>
       <tbody>
         {#each records as r,i (r.audio_file + i)}
-          <tr class:not-reviewed-row={!reviewed[r.audio_file]}>
-            <td>{fmt(r.timestamp)}</td>
-            <td class="small-audio"><audio controls src={`http://localhost:8000/audio/${r.audio_file}`}></audio></td>
+          <tr class:not-reviewed-row={!reviewed[r.audio_file]} class:saving-row={saving[r.audio_file]}>
+            <td class="time-col">{fmt(r.timestamp)}</td>
+            <td class="small-audio">
+              <audio controls src={`${BACKEND_URL}/audio/${r.audio_file}`}></audio>
+            </td>
             <td style="width:100%;">
               <textarea
                 rows="2"
                 style="width:100%;box-sizing:border-box;"
                 bind:value={manual[r.audio_file]}
                 on:blur={()=>save(r)}
-                disabled={saving[r.audio_file]}>
-              </textarea>
+                disabled={saving[r.audio_file]}
+                placeholder="Edit transcription..."
+              ></textarea>
+              {#if r.asr_transcript !== manual[r.audio_file]}
+                <small class="edited-indicator">✏️ Edited</small>
+              {/if}
             </td>
             <td style="text-align:center">
-              {#if reviewed[r.audio_file]}
-                ✔
+              {#if saving[r.audio_file]}
+                <span class="saving-indicator">💾</span>
+              {:else if reviewed[r.audio_file]}
+                <span class="checked">✔</span>
               {:else}
-                <button class="approve-btn" title="Mark correct" on:click={()=>approve(r)}>✓</button>
+                <button class="approve-btn" title="Mark as correct" on:click={()=>approve(r)}>✓ Approve</button>
               {/if}
             </td>
           </tr>

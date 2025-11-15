@@ -15,6 +15,7 @@ datasets
 jiwer
 mlflow
 optuna
+tqdm
 
 # LoRA / Parameter-Efficient Fine-Tuning
 peft
@@ -22,15 +23,15 @@ peft
 # Differential privacy
 opacus
 
-# HuggingFace Whisper
-# (Installed via transformers, but you can optionally specify openai-whisper if you want vanilla Whisper)
-# openai-whisper
-
 # For handling HTTP requests in LoRA training script
 requests
 
 # Audio
 soundfile
 
-# (Optional: for robust numerical stuff)
+# Data processing
 numpy
+pandas
+
+# Progress bars
+tqdm
