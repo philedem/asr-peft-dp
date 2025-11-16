@@ -137,7 +137,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
-print("Loading Whisper processor + base model ...")
+
+# Check if model is cached, download if needed
+cache_dir = Path(os.getenv("HF_HOME", str(Path.home() / ".cache/huggingface")))
+model_cache_path = cache_dir / "hub"
+if model_cache_path.exists() and any(model_cache_path.iterdir()):
+    print(f"Model cache found at {model_cache_path}")
+else:
+    print(f"Model not cached. Downloading {BASE_MODEL} to {cache_dir}...")
+    print("This is a one-time download (~1.5GB) and will be cached for future use.")
+
+print(f"Loading Whisper processor + base model ({BASE_MODEL})...")
 processor: WhisperProcessor = WhisperProcessor.from_pretrained(BASE_MODEL)
 _base = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL).to(DEVICE)
 

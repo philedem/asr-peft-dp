@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/data:/workspace/data
+      - huggingface-cache:/workspace/.cache/huggingface  # Cache models across rebuilds
     environment:
       - PYTHONUNBUFFERED=1
   frontend:
@@ -16,3 +17,6 @@ services:
       - backend
     environment:
       - VITE_BACKEND_URL=http://localhost:8000
+
+volumes:
+  huggingface-cache:  # Named volume for model cache persistence

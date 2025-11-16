@@ -12,7 +12,10 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 3. Copy your backend app
+# 3. Set HuggingFace cache directory
+ENV HF_HOME=/workspace/.cache/huggingface
+
+# 4. Copy your backend app
 WORKDIR /workspace
 COPY . .
 
