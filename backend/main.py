@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 import torchaudio
+import soundfile as sf
+import numpy as np
 from pydub import AudioSegment, silence
 import torch
 from fastapi import FastAPI, UploadFile, File, Request
@@ -60,7 +62,16 @@ def _attach_lora(base) -> WhisperForConditionalGeneration:
 def _transcribe_wav(path: Path) -> str:
     """Blocking whisper inference (must be run under MODEL_LOCK)."""
     try:
-        wav, sr = torchaudio.load(path)
+        # Use soundfile directly to avoid torchaudio 2.9+ breaking changes
+        wav, sr = sf.read(str(path))
+        wav = torch.from_numpy(wav).float()
+        
+        # Ensure we have the right shape [channels, samples]
+        if wav.ndim == 1:
+            wav = wav.unsqueeze(0)
+        else:
+            wav = wav.T  # soundfile returns [samples, channels], we need [channels, samples]
+        
         if sr != 16000:
             wav = torchaudio.transforms.Resample(sr, 16000)(wav)
         if wav.shape[0] > 1:                    # stereo to mono

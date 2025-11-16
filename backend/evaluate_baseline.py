@@ -6,6 +6,8 @@ Run this before fine-tuning to establish baseline metrics.
 import json
 import torch
 import torchaudio
+import soundfile as sf
+import numpy as np
 from pathlib import Path
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 import jiwer
@@ -29,7 +31,16 @@ def load_test_set(test_file: str):
 
 def transcribe_audio(audio_path: str, processor, model):
     """Transcribe a single audio file."""
-    wav, sr = torchaudio.load(audio_path)
+    # Use soundfile directly to avoid torchaudio 2.9+ breaking changes
+    wav, sr = sf.read(audio_path)
+    wav = torch.from_numpy(wav).float()
+    
+    # Ensure we have the right shape [channels, samples]
+    if wav.ndim == 1:
+        wav = wav.unsqueeze(0)
+    else:
+        wav = wav.T  # soundfile returns [samples, channels], we need [channels, samples]
+    
     if sr != 16000:
         wav = torchaudio.transforms.Resample(sr, 16000)(wav)
     if wav.shape[0] > 1:

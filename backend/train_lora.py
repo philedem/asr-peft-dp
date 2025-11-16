@@ -6,6 +6,7 @@ writes WER, pings backend to reload.
 import os, json, torch, requests, warnings
 from datasets import Dataset
 import torchaudio, jiwer, torch
+import soundfile as sf
 from transformers import (
     WhisperProcessor, WhisperForConditionalGeneration,
     Seq2SeqTrainer, Seq2SeqTrainingArguments
@@ -88,8 +89,16 @@ def collate_fn(batch, processor, bos_id):
 
 
 def map_sample(batch):
-    import torchaudio
-    wav, sr = torchaudio.load(os.path.join(AUDIO_DIR, batch["audio_file"]))
+    # Use soundfile directly to avoid torchaudio 2.9+ breaking changes
+    wav, sr = sf.read(os.path.join(AUDIO_DIR, batch["audio_file"]))
+    wav = torch.from_numpy(wav).float()
+    
+    # Ensure we have the right shape [channels, samples]
+    if wav.ndim == 1:
+        wav = wav.unsqueeze(0)
+    else:
+        wav = wav.T  # soundfile returns [samples, channels], we need [channels, samples]
+    
     if sr != 16000:
         wav = torchaudio.transforms.Resample(sr, 16000)(wav)
     if wav.shape[0] > 1:
@@ -104,7 +113,16 @@ def map_sample(batch):
 
 def evaluate_and_log(model, processor, records, out_dir):
     def transcribe(path):
-        wav, sr = torchaudio.load(path)
+        # Use soundfile directly to avoid torchaudio 2.9+ breaking changes
+        wav, sr = sf.read(str(path))
+        wav = torch.from_numpy(wav).float()
+        
+        # Ensure we have the right shape [channels, samples]
+        if wav.ndim == 1:
+            wav = wav.unsqueeze(0)
+        else:
+            wav = wav.T  # soundfile returns [samples, channels], we need [channels, samples]
+        
         if sr != 16000:
             wav = torchaudio.transforms.Resample(sr,16000)(wav)
         if wav.shape[0] > 1:
