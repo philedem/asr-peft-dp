@@ -9,6 +9,7 @@
   let loading=false, err='';
   let notification='', notifType='success', showNotif=false;
   let manual:Record<string,string>={}, reviewed:Record<string,boolean>={}, saving:Record<string,boolean>={};
+  let originalManual:Record<string,string>={}; // Track original values to detect changes
   let wer='';
   let isRecording=false, chunks:Blob[]=[], recorder:MediaRecorder|null=null;
   let uploadProgress=false;
@@ -54,9 +55,10 @@
     try{
       records=await getJSON(`${BACKEND_URL}/asr/records`);
       records.sort((a,b)=>(b.timestamp??'').localeCompare(a.timestamp??''));
-      manual={}; reviewed={};
+      manual={}; reviewed={}; originalManual={};
       records.forEach(r=>{
         manual[r.audio_file] = r.manual_transcript?.length ? r.manual_transcript : r.asr_transcript || '';
+        originalManual[r.audio_file] = manual[r.audio_file]; // Store original
         reviewed[r.audio_file] = !!(r.manual_transcript && r.manual_transcript.length > 0);
       });
     }catch(e){
@@ -66,8 +68,14 @@
     loading=false;
   }
 
-  async function save(r){
+  async function save(r, force=false){
     if (saving[r.audio_file]) return;
+    
+    // Don't save if nothing changed (unless forced, e.g. from approve)
+    if (!force && manual[r.audio_file] === originalManual[r.audio_file]) {
+      return;
+    }
+    
     saving[r.audio_file]=true;
     try {
       await post(`${BACKEND_URL}/asr/save_record`,{
@@ -76,6 +84,7 @@
         manual_transcript:manual[r.audio_file],
       });
       reviewed[r.audio_file] = !!(manual[r.audio_file] && manual[r.audio_file].length > 0);
+      originalManual[r.audio_file] = manual[r.audio_file]; // Update original after save
       toast('Saved successfully'); 
       await load(); 
       await fetchWER();
@@ -85,6 +94,11 @@
       saving[r.audio_file]=false;
     }
   }
+  
+  // Check if there are unsaved changes
+  const hasUnsavedChanges = (audioFile:string) => {
+    return manual[audioFile] !== originalManual[audioFile];
+  };
 
   // ---------- recording ----------
   async function toggleRec(){
@@ -136,7 +150,7 @@
   
   const approve=async (r)=>{ 
     manual[r.audio_file]=r.asr_transcript; 
-    await save(r); 
+    await save(r, true); // Force save even if value hasn't changed
   };
 
   async function triggerManualRetrain() {
@@ -238,17 +252,20 @@
                 rows="2"
                 style="width:100%;box-sizing:border-box;"
                 bind:value={manual[r.audio_file]}
-                on:blur={()=>save(r)}
                 disabled={saving[r.audio_file]}
                 placeholder="Edit transcription..."
               ></textarea>
-              {#if r.asr_transcript !== manual[r.audio_file]}
+              {#if hasUnsavedChanges(r.audio_file)}
+                <small class="unsaved-indicator">⚠️ Unsaved changes</small>
+              {:else if r.asr_transcript !== manual[r.audio_file]}
                 <small class="edited-indicator">✏️ Edited</small>
               {/if}
             </td>
             <td style="text-align:center">
               {#if saving[r.audio_file]}
                 <span class="saving-indicator">💾</span>
+              {:else if hasUnsavedChanges(r.audio_file)}
+                <button class="save-btn" on:click={()=>save(r)}>💾 Save</button>
               {:else if reviewed[r.audio_file]}
                 <span class="checked">✔</span>
               {:else}

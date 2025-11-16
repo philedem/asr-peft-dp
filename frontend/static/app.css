@@ -243,6 +243,46 @@ h1 {
   letter-spacing: 0.05em;
 }
 
+.unsaved-indicator {
+  color: var(--error);
+  font-weight: 700;
+  margin-left: 0.5em;
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.save-btn {
+  padding: 0.5em 1em;
+  background: var(--midlaier-teal);
+  color: var(--midlaier-darker);
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+  font-family: 'Roboto Mono', monospace;
+  font-weight: 700;
+  font-size: 0.9em;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  transition: all 0.2s ease;
+}
+
+.save-btn:hover {
+  background: #00ffcc;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 212, 170, 0.3);
+}
+
+.save-btn:active {
+  transform: translateY(0);
+}
+
 /* Loading States */
 .loading-state, .empty-state, .error-state {
   text-align: center;
