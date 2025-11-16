@@ -9,6 +9,7 @@ services:
       - huggingface-cache:/workspace/.cache/huggingface  # Cache models across rebuilds
     environment:
       - PYTHONUNBUFFERED=1
+      - ENABLE_DIFFERENTIAL_PRIVACY=false  # Set to 'true' to enable DP for training
   frontend:
     build: ./frontend
     ports:

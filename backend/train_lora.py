@@ -40,6 +40,11 @@ RECORD_DIR      = "data/records"
 AUDIO_DIR       = "data/audio"
 ADAPTER_OUT_DIR = "data/lora_output"
 
+# Feature flag: Enable/disable differential privacy
+# Set ENABLE_DIFFERENTIAL_PRIVACY=false to disable DP (for CISK experiment)
+ENABLE_DP = os.getenv("ENABLE_DIFFERENTIAL_PRIVACY", "false").lower() == "true"
+print(f"Differential Privacy: {'ENABLED' if ENABLE_DP else 'DISABLED'}")
+
 BATCH_SIZE      = 4
 EPOCHS          = 3
 MAX_GRAD_NORM   = 1.0
@@ -152,21 +157,31 @@ def train_with_dp(
         max_grad_norm=1.0,
         device=DEVICE
 ):
+    """
+    Train model with optional differential privacy.
+    If ENABLE_DP=False, uses standard training without privacy guarantees.
+    """
     model.to(device)
     model.train()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    privacy_engine = PrivacyEngine()
-    model, optimizer, loader = privacy_engine.make_private_with_epsilon(
-        module=model,
-        optimizer=optimizer,
-        data_loader=loader,
-        epochs=epochs,
-        target_epsilon=target_epsilon,
-        target_delta=target_delta,
-        max_grad_norm=max_grad_norm,
-    )
+    if ENABLE_DP:
+        # Training WITH differential privacy
+        print(f"Training with DP (ε={target_epsilon}, δ={target_delta})")
+        privacy_engine = PrivacyEngine()
+        model, optimizer, loader = privacy_engine.make_private_with_epsilon(
+            module=model,
+            optimizer=optimizer,
+            data_loader=loader,
+            epochs=epochs,
+            target_epsilon=target_epsilon,
+            target_delta=target_delta,
+            max_grad_norm=max_grad_norm,
+        )
+    else:
+        # Training WITHOUT differential privacy (standard PEFT fine-tuning)
+        print("Training without DP (standard fine-tuning)")
 
     for ep in range(epochs):
         running_loss = 0.0
@@ -176,20 +191,32 @@ def train_with_dp(
             out = model(input_features=input_features, labels=labels)
             loss = out.loss
             loss.backward()
+            
+            # Apply gradient clipping for non-DP training
+            if not ENABLE_DP:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            
             optimizer.step()
             optimizer.zero_grad()
             running_loss += loss.item()
 
-        eps = privacy_engine.get_epsilon(target_delta)
         avg_loss = running_loss / len(loader)
-        print(f"Epoch {ep+1}/{epochs}  |  Loss {avg_loss:.4f}  |  ε={eps:.2f}")
         
-        # Log loss and epsilon per epoch to MLflow
+        if ENABLE_DP:
+            eps = privacy_engine.get_epsilon(target_delta)
+            print(f"Epoch {ep+1}/{epochs}  |  Loss {avg_loss:.4f}  |  ε={eps:.2f}")
+            mlflow.log_metric("epsilon", eps, step=ep+1)
+        else:
+            print(f"Epoch {ep+1}/{epochs}  |  Loss {avg_loss:.4f}")
+        
+        # Log loss per epoch to MLflow
         mlflow.log_metric("loss", avg_loss, step=ep+1)
-        mlflow.log_metric("epsilon", eps, step=ep+1)
 
-
-    return privacy_engine.get_epsilon(target_delta)
+    # Return epsilon if DP is enabled, otherwise return None
+    if ENABLE_DP:
+        return privacy_engine.get_epsilon(target_delta)
+    else:
+        return None
 
 grid = list(product(lrs, target_epsilons,
                     lora_rs, lora_alphas, lora_dropouts))
@@ -253,16 +280,19 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
 
     with mlflow.start_run():
         # --- Log hyperparameters
-        mlflow.log_params({
+        params = {
             "lr"            : lr,
-            "target_eps"    : eps,
             "lora_r"        : r,
             "lora_alpha"    : alpha,
             "lora_dropout"  : dropout,
             "epochs"        : EPOCHS,
             "batch_size"    : BATCH_SIZE,
-            "max_grad_norm" : MAX_GRAD_NORM
-        })
+            "max_grad_norm" : MAX_GRAD_NORM,
+            "differential_privacy": ENABLE_DP
+        }
+        if ENABLE_DP:
+            params["target_eps"] = eps
+        mlflow.log_params(params)
 
         print(f"\n=== [{run_name}] training ===")
         final_eps = train_with_dp(
@@ -274,12 +304,16 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
             max_grad_norm=MAX_GRAD_NORM,
         )
 
-        print(f"Training finished.  (ε, δ)=({final_eps:.2f}, 1e-5)")
+        if ENABLE_DP and final_eps is not None:
+            print(f"Training finished.  (ε, δ)=({final_eps:.2f}, 1e-5)")
+            mlflow.log_metric("final_epsilon", final_eps)
+        else:
+            print("Training finished (no DP).")
+        
         print("=== saving adapter ===")
         model.save_pretrained(adapter_dir)
         wer = evaluate_and_log(model, processor, records, adapter_dir) 
 
-        mlflow.log_metric("final_epsilon", final_eps)
         mlflow.log_metric("WER", wer)
         mlflow.log_artifacts(adapter_dir, artifact_path="lora_adapter")
 
