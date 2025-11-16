@@ -20,6 +20,8 @@ AUDIO_DIR   = Path("data/audio")
 RECORD_DIR  = Path("data/records")
 ADAPTER_DIR = Path("data/lora_output")
 WER_FILE    = Path("data/wer.txt")
+BASELINE_WER_FILE = Path("data/baseline_wer.txt")
+TRAINING_ITERATION_FILE = Path("data/training_iteration.txt")
 
 MIN_SILENCE_MS     = 2000                   # chunk params
 KEEP_SILENCE_MS    = 300

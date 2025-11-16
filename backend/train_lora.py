@@ -39,6 +39,7 @@ else:
 RECORD_DIR      = "data/records"
 AUDIO_DIR       = "data/audio"
 ADAPTER_OUT_DIR = "data/lora_output"
+ITERATION_FILE  = "data/training_iteration.txt"
 
 # Feature flag: Enable/disable differential privacy
 # Set ENABLE_DIFFERENTIAL_PRIVACY=false to disable DP (for CISK experiment)
@@ -73,6 +74,21 @@ else:
     lora_rs        = [LORA_R]
     lora_alphas    = [LORA_ALPHA]
     lora_dropouts  = [LORA_DROPOUT]
+
+def get_training_iteration():
+    """Get current training iteration number."""
+    if Path(ITERATION_FILE).exists():
+        try:
+            return int(Path(ITERATION_FILE).read_text().strip())
+        except:
+            return 0
+    return 0
+
+def increment_training_iteration():
+    """Increment and return the training iteration number."""
+    iteration = get_training_iteration() + 1
+    Path(ITERATION_FILE).write_text(str(iteration))
+    return iteration
 
 def collate_fn(batch, processor, bos_id):
     input_features = [{"input_features": b["input_features"]} for b in batch]
@@ -147,8 +163,21 @@ def evaluate_and_log(model, processor, records, out_dir):
         refs.append(r["manual_transcript"])
 
     wer = jiwer.wer(refs, preds)
+    
+    # Write detailed WER report
     with open(Path(out_dir) / "wer.txt", "w") as f:
-        f.write(f"WER: {wer:.4f}\n")
+        from datetime import datetime
+        f.write(f"=== WER Evaluation Report ===\n")
+        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+        f.write(f"Number of samples: {len(records)}\n")
+        f.write(f"WER: {wer:.4f} ({wer*100:.2f}%)\n")
+        f.write(f"\n--- Sample Predictions (first 3) ---\n")
+        for i in range(min(3, len(records))):
+            f.write(f"\nSample {i+1}:\n")
+            f.write(f"  Reference:  {refs[i]}\n")
+            f.write(f"  Prediction: {preds[i]}\n")
+    
+    print(f"WER: {wer:.4f} ({wer*100:.2f}%)")
     return wer
 
 def train_with_dp(
@@ -222,7 +251,10 @@ grid = list(product(lrs, target_epsilons,
                     lora_rs, lora_alphas, lora_dropouts))
 print(f"{len(grid)} configs to run")
 
-mlflow.set_experiment("Whisper LoRA DP Tuning")
+# Set MLflow experiment name based on DP mode
+experiment_name = "CISK-PEFT-FineTuning" if not ENABLE_DP else "Whisper-LoRA-DP"
+mlflow.set_experiment(experiment_name)
+print(f"MLflow experiment: {experiment_name}")
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -255,6 +287,12 @@ train_loader = DataLoader(
     collate_fn=torch_collate,
 )
 
+# Get training iteration for tracking
+training_iteration = increment_training_iteration()
+print(f"\n{'='*60}")
+print(f"TRAINING ITERATION #{training_iteration}")
+print(f"{'='*60}\n")
+
 for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
     # Clean up previous model to free memory
     if i > 1:
@@ -266,7 +304,12 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
         
     base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
 
-    run_name = f"run_{i:02d}_lr{lr}_eps{eps}_r{r}_a{alpha}_d{dropout}" if RUN_GRID_SEARCH else "lora_adapter"
+    # Better run naming for single runs
+    if not RUN_GRID_SEARCH:
+        run_name = f"iter_{training_iteration:03d}_{len(records)}_samples"
+    else:
+        run_name = f"run_{i:02d}_lr{lr}_eps{eps}_r{r}_a{alpha}_d{dropout}"
+    
     adapter_dir = Path(ADAPTER_OUT_DIR) / run_name if RUN_GRID_SEARCH else Path(ADAPTER_OUT_DIR)
     adapter_dir.mkdir(parents=True, exist_ok=True)
 
@@ -278,8 +321,8 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
     )
     model = get_peft_model(base_model, lora_cfg)
 
-    with mlflow.start_run():
-        # --- Log hyperparameters
+    with mlflow.start_run(run_name=run_name):
+        # --- Log hyperparameters and system info
         params = {
             "lr"            : lr,
             "lora_r"        : r,
@@ -288,13 +331,27 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
             "epochs"        : EPOCHS,
             "batch_size"    : BATCH_SIZE,
             "max_grad_norm" : MAX_GRAD_NORM,
-            "differential_privacy": ENABLE_DP
+            "differential_privacy": ENABLE_DP,
+            "device"        : DEVICE,
+            "num_train_samples": len(records),
+            "model_name"    : MODEL_NAME,
+            "training_iteration": training_iteration
         }
         if ENABLE_DP:
             params["target_eps"] = eps
+            params["target_delta"] = TARGET_DELTA
         mlflow.log_params(params)
 
+        # Log training metadata
+        from datetime import datetime
+        mlflow.set_tag("training_date", datetime.now().isoformat())
+        mlflow.set_tag("experiment_type", "CISK" if not ENABLE_DP else "DP")
+        mlflow.set_tag("model_type", "LoRA-Whisper")
+
         print(f"\n=== [{run_name}] training ===")
+        print(f"Training samples: {len(records)}")
+        print(f"Device: {DEVICE}")
+        
         final_eps = train_with_dp(
             model=model,
             loader=train_loader,
@@ -314,18 +371,37 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
         model.save_pretrained(adapter_dir)
         wer = evaluate_and_log(model, processor, records, adapter_dir) 
 
+        # Log final metrics
         mlflow.log_metric("WER", wer)
+        mlflow.log_metric("num_train_samples", len(records))
         mlflow.log_artifacts(adapter_dir, artifact_path="lora_adapter")
 
         # Ping backend to hot-reload the adapter
         try:
             backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
             requests.post(f"{backend_url}/asr/reload_adapter", timeout=5)
-            print("Successfully notified backend to reload adapter")
+            print("✓ Successfully notified backend to reload adapter")
         except Exception as e:
-            print(f"Warning: Could not reload adapter in backend: {e}")
+            print(f"⚠ Warning: Could not reload adapter in backend: {e}")
+        
+        # Print summary for students
+        print("\n" + "="*60)
+        print("TRAINING SUMMARY")
+        print("="*60)
+        print(f"Model: {MODEL_NAME}")
+        print(f"Training Mode: {'Standard PEFT (no DP)' if not ENABLE_DP else 'PEFT with Differential Privacy'}")
+        print(f"Training Samples: {len(records)}")
+        print(f"Final WER: {wer:.4f} ({wer*100:.2f}%)")
+        if ENABLE_DP and final_eps:
+            print(f"Privacy Budget: ε={final_eps:.2f}, δ={TARGET_DELTA}")
+        print(f"Adapter saved to: {adapter_dir}")
+        print(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
+        print("="*60)
 
 print("\n✓ Training complete!")
 if not RUN_GRID_SEARCH:
-    print(f"Adapter saved to: {ADAPTER_OUT_DIR}")
-    print("Backend has been notified to reload the model.")
+    print(f"\n📊 View results in MLflow UI:")
+    print(f"   mlflow ui --port 5000")
+    print(f"   Then open: http://localhost:5000")
+    print(f"\n📁 Adapter location: {ADAPTER_OUT_DIR}")
+    print("🔄 Backend has been notified to reload the model.")
