@@ -1,0 +1,96 @@
+# Default values for asr-peft
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Image settings
+image:
+  registry: intmidlaiercscr71ee46dc.azurecr.io
+  pullPolicy: Always
+  pullSecrets:
+    - name: asr-peft-pull-secret
+
+# Backend configuration
+backend:
+  name: asr-peft-backend
+  image:
+    repository: asr-peft-backend
+    tag: latest
+  replicas: 1
+  service:
+    type: NodePort
+    port: 8000
+    nodePort: 30800
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "2000m"
+      nvidia.com/gpu: "1"
+    limits:
+      memory: "8Gi"
+      cpu: "4000m"
+      nvidia.com/gpu: "1"
+  env:
+    enableDifferentialPrivacy: "false"
+    hfHome: "/workspace/.cache/huggingface"
+  runtimeClassName: nvidia  # Use NVIDIA container runtime for GPU access
+
+# Frontend configuration
+frontend:
+  name: asr-peft-frontend
+  image:
+    repository: asr-peft-frontend
+    tag: latest
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 5173
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# Persistence configuration
+persistence:
+  data:
+    enabled: true
+    storageClass: ""  # Use default storage class
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    existingClaim: ""  # Set to use existing PVC
+  hfCache:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 20Gi
+    existingClaim: ""
+
+# Ingress configuration
+ingress:
+  enabled: true
+  enableBackend: false  # Backend uses NodePort instead
+  className: traefik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+  hosts:
+    frontend:
+      host: asr.192.168.3.155.nip.io
+      paths:
+        - path: /
+          pathType: Prefix
+    backend:
+      host: asr-api.192.168.3.155.nip.io
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: midlaier-tls
+      hosts:
+        - asr.192.168.3.155.nip.io
+
+# Backend URL for frontend (uses NodePort instead of ingress)
+backendUrl: "http://192.168.3.155:30800"

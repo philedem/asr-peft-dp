@@ -1,0 +1,14 @@
+apiVersion: v2
+name: asr-peft
+description: ASR PEFT - Automatic Speech Recognition with Parameter-Efficient Fine-Tuning
+type: application
+version: 0.1.0
+appVersion: "1.0"
+keywords:
+  - asr
+  - whisper
+  - peft
+  - lora
+  - machine-learning
+maintainers:
+  - name: eve

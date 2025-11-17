@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.backend.name }}
+  labels:
+    {{- include "asr-peft.backend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.backend.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.backend.name }}
+    spec:
+      runtimeClassName: {{ .Values.backend.runtimeClassName }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: backend
+        image: "{{ .Values.image.registry }}/{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.backend.service.port }}
+          name: http
+        env:
+        - name: ENABLE_DIFFERENTIAL_PRIVACY
+          value: {{ .Values.backend.env.enableDifferentialPrivacy | quote }}
+        - name: HF_HOME
+          value: {{ .Values.backend.env.hfHome | quote }}
+        resources:
+          {{- toYaml .Values.backend.resources | nindent 10 }}
+        volumeMounts:
+        - name: data
+          mountPath: /workspace/data
+        - name: hf-cache
+          mountPath: {{ .Values.backend.env.hfHome }}
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ .Values.persistence.data.existingClaim | default (printf "%s-data" .Values.backend.name) }}
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: {{ .Values.persistence.hfCache.existingClaim | default (printf "%s-hf-cache" .Values.backend.name) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.backend.name }}
+  labels:
+    {{- include "asr-peft.backend.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.backend.service.type }}
+  selector:
+    app: {{ .Values.backend.name }}
+  ports:
+  - port: {{ .Values.backend.service.port }}
+    targetPort: {{ .Values.backend.service.port }}
+    {{- if .Values.backend.service.nodePort }}
+    nodePort: {{ .Values.backend.service.nodePort }}
+    {{- end }}
+    name: http

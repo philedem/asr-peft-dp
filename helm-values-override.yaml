@@ -1,0 +1,8 @@
+# Use existing PVCs created from previous deployment
+persistence:
+  data:
+    enabled: false  # Don't create new PVC
+    existingClaim: "asr-peft-data"
+  hfCache:
+    enabled: false  # Don't create new PVC
+    existingClaim: "asr-peft-hf-cache"
