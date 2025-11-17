@@ -330,6 +330,39 @@ def list_records():
     return recs
 
 
+@app.delete("/asr/records/{record_id}")
+def delete_record(record_id: str):
+    """Delete a record and its associated audio file."""
+    try:
+        # Find and delete the JSON file
+        json_file = RECORD_DIR / f"{record_id}.json"
+        if not json_file.exists():
+            return JSONResponse({"error": "Record not found"}, status_code=404)
+        
+        # Load the record to get audio filename
+        record = json.loads(json_file.read_text())
+        audio_filename = record.get("audio_file")
+        
+        # Delete the JSON file
+        json_file.unlink()
+        print(f"Deleted record: {record_id}.json")
+        
+        # Delete the audio file if it exists
+        if audio_filename:
+            audio_file = AUDIO_DIR / audio_filename
+            if audio_file.exists():
+                audio_file.unlink()
+                print(f"Deleted audio: {audio_filename}")
+        
+        return {"ok": True, "deleted": record_id}
+    
+    except Exception as e:
+        print(f"Error deleting record {record_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": f"Delete failed: {str(e)}"}, status_code=500)
+
+
 @app.get("/asr/wer")
 def get_wer():
     if WER_FILE.is_file():

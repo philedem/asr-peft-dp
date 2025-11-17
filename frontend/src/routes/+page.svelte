@@ -132,6 +132,29 @@
     return manual[audioFile] !== originalManual[audioFile];
   };
 
+  // Delete a record
+  async function deleteRecord(r:any) {
+    if (!confirm(`Delete this record? This cannot be undone.\n\nAudio: ${r.audio_file}`)) {
+      return;
+    }
+    
+    try {
+      const recordId = r.audio_file.replace('.wav', '');
+      const res = await fetch(`${BACKEND_URL}/asr/records/${recordId}`, {
+        method: 'DELETE'
+      });
+      
+      if (!res.ok) {
+        throw new Error('Delete failed');
+      }
+      
+      toast('Record deleted');
+      await load(); // Reload the records list
+    } catch(e) {
+      toast('Delete failed', 'error');
+    }
+  }
+
   // ---------- recording ----------
   async function toggleRec(){
     if(!isRecording){
@@ -306,6 +329,7 @@
         <th>Audio</th>
         <th>Transcript</th>
         <th>Status</th>
+        <th>Actions</th>
       </tr></thead>
       <tbody>
         {#each records as r,i (r.audio_file + i)}
@@ -338,6 +362,9 @@
               {:else}
                 <button class="approve-btn" title="Mark as correct" on:click={()=>approve(r)}>✓ Approve</button>
               {/if}
+            </td>
+            <td style="text-align:center">
+              <button class="delete-btn" title="Delete this record" on:click={()=>deleteRecord(r)}>🗑️</button>
             </td>
           </tr>
         {/each}
