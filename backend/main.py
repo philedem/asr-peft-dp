@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from peft import PeftModel
+from faster_whisper import WhisperModel
 
 # ───────────────────────────── configuration ──────────────────────────────
 AUDIO_DIR   = Path("data/audio")
@@ -42,6 +43,14 @@ DEVICE = os.getenv("DEVICE")
 if DEVICE:
     print(f"Using device from environment: {DEVICE}")
 else:
+    # Debug CUDA detection
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA built version: {torch.version.cuda}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+    
     if torch.cuda.is_available():
         DEVICE = "cuda"
     elif torch.backends.mps.is_available():
@@ -67,36 +76,25 @@ def _attach_lora(base) -> WhisperForConditionalGeneration:
     return base
 
 def _transcribe_wav(path: Path) -> str:
-    """Blocking whisper inference (must be run under MODEL_LOCK)."""
+    """Blocking whisper inference using faster-whisper (GPU-compatible with sm_121)."""
     try:
-        # Use soundfile directly to avoid torchaudio 2.9+ breaking changes
-        wav, sr = sf.read(str(path))
-        wav = torch.from_numpy(wav).float()
-        
-        # Ensure we have the right shape [channels, samples]
-        if wav.ndim == 1:
-            wav = wav.unsqueeze(0)
-        else:
-            wav = wav.T  # soundfile returns [samples, channels], we need [channels, samples]
-        
-        if sr != 16000:
-            wav = torchaudio.transforms.Resample(sr, 16000)(wav)
-        if wav.shape[0] > 1:                    # stereo to mono
-            wav = wav.mean(dim=0, keepdim=True)
-
-        feats = processor(
-            wav.squeeze().numpy(), sampling_rate=16000, return_tensors="pt"
-        ).input_features.to(DEVICE)
-
-        ids = model.generate(
-            feats,
-            forced_decoder_ids=processor.get_decoder_prompt_ids(
-                task="transcribe", language="no"
-            ),
+        # faster-whisper handles audio loading and preprocessing internally
+        segments, info = faster_whisper_model.transcribe(
+            str(path),
+            language="no",
+            task="transcribe",
+            beam_size=5,
+            vad_filter=False,
         )
-        return processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
+        
+        # Combine all segments into single transcription
+        transcription = " ".join([segment.text for segment in segments]).strip()
+        return transcription
+        
     except Exception as e:
         print(f"Error transcribing {path}: {e}")
+        import traceback
+        traceback.print_exc()
         return "[transcription failed]"
 
 
@@ -189,12 +187,25 @@ else:
     print(f"Model not cached. Downloading {BASE_MODEL} to {cache_dir}...")
     print("This is a one-time download (~1.5GB) and will be cached for future use.")
 
-print(f"Loading Whisper processor + base model ({BASE_MODEL})...")
+# Initialize faster-whisper for GPU inference (works with sm_121/GB10)
+print(f"Loading faster-whisper model ({BASE_MODEL}) for GPU inference...")
+compute_type = "float16" if DEVICE == "cuda" else "int8"
+faster_whisper_model = WhisperModel(
+    BASE_MODEL,
+    device=DEVICE,
+    compute_type=compute_type,
+    download_root=cache_dir
+)
+print(f"✓ faster-whisper loaded on {DEVICE} with compute_type={compute_type}")
+
+# Also load transformers model for training (LoRA fine-tuning)
+print(f"Loading transformers model ({BASE_MODEL}) for LoRA training...")
 processor: WhisperProcessor = WhisperProcessor.from_pretrained(BASE_MODEL)
 _base = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL).to(DEVICE)
 
 model = _attach_lora(_base)
 MODEL_LOCK = asyncio.Lock()                 # serialise GPU access
+print(f"✓ Training model loaded (LoRA adapter will be applied if available)")
 
 # ───────── 1. receive stream/blob -> chunk -> transcribe ──────────
 @app.post("/asr/transcribe")
@@ -287,7 +298,7 @@ async def save_record(req: Request):
             if reviews >= MANUAL_RETRAIN_N:
                 print("Threshold reached – launching LoRA fine-tune ...")
                 _set_training_status("running", 0, "Auto-training started (20 corrections reached)")
-                subprocess.Popen(["python", "train_lora.py"])
+                subprocess.Popen(["/usr/bin/python3.12", "train_lora.py"])
                 _reset_review_counter()
 
         return {"ok": True}
@@ -303,7 +314,7 @@ async def retrain_lora():
     """Trigger LoRA fine-tuning (non-blocking)."""
     print("Launching manual LoRA fine-tune ...")
     _set_training_status("running", 0, "Training started")
-    subprocess.Popen(["python", "train_lora.py"])
+    subprocess.Popen(["/usr/bin/python3.12", "train_lora.py"])
     return {"status": "retraining started"}
 
 # ───────── 3. list records, WER, serve audio ───────────

@@ -8,8 +8,7 @@ python-multipart
 starlette
 
 # Machine Learning
-torch
-torchaudio
+# Note: torch and torchaudio are installed in Dockerfile with CUDA support
 transformers
 datasets
 jiwer
@@ -19,6 +18,9 @@ tqdm
 
 # LoRA / Parameter-Efficient Fine-Tuning
 peft
+
+# Fast GPU inference with CTranslate2 (built from source in Dockerfile with CUDA support)
+faster-whisper==1.0.3
 
 # Differential privacy
 opacus

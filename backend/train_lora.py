@@ -280,160 +280,160 @@ try:
 
     warnings.filterwarnings("ignore", category=UserWarning)
 
-print("Loading Whisper processor and base model...")
-processor  = WhisperProcessor.from_pretrained(MODEL_NAME)
-base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
-
-bos_id = base_model.generation_config.decoder_start_token_id
-torch_collate = partial(collate_fn, processor=processor, bos_id=bos_id)
-
-# -------- gather data ----------
-records = []
-for f in os.listdir(RECORD_DIR):
-    if f.endswith(".json"):
-        d = json.load(open(os.path.join(RECORD_DIR,f)))
-        if d.get("manual_transcript","").strip():
-            records.append(d)
-
-if not records:
-    raise RuntimeError("No manually-reviewed records to train on.")
-
-
-ds  = Dataset.from_list(records).map(map_sample)
-ds = ds.remove_columns([c for c in ds.column_names if c not in ("input_features", "labels")])
-
-train_loader = DataLoader(
-    ds,     
-    batch_size=BATCH_SIZE,         
-    shuffle=True,
-    collate_fn=torch_collate,
-)
-
-# Get training iteration for tracking
-training_iteration = increment_training_iteration()
-print(f"\n{'='*60}")
-print(f"TRAINING ITERATION #{training_iteration}")
-print(f"{'='*60}\n")
-
-for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
-    # Clean up previous model to free memory
-    if i > 1:
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-        
+    print("Loading Whisper processor and base model...")
+    processor  = WhisperProcessor.from_pretrained(MODEL_NAME)
     base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
 
-    # Better run naming for single runs
-    if not RUN_GRID_SEARCH:
-        run_name = f"iter_{training_iteration:03d}_{len(records)}_samples"
-    else:
-        run_name = f"run_{i:02d}_lr{lr}_eps{eps}_r{r}_a{alpha}_d{dropout}"
-    
-    adapter_dir = Path(ADAPTER_OUT_DIR) / run_name if RUN_GRID_SEARCH else Path(ADAPTER_OUT_DIR)
-    adapter_dir.mkdir(parents=True, exist_ok=True)
+    bos_id = base_model.generation_config.decoder_start_token_id
+    torch_collate = partial(collate_fn, processor=processor, bos_id=bos_id)
 
-    lora_cfg = LoraConfig(
-        r           = r,
-        lora_alpha  = alpha,
-        lora_dropout= dropout,
-        target_modules=["q_proj","v_proj"],
+    # -------- gather data ----------
+    records = []
+    for f in os.listdir(RECORD_DIR):
+        if f.endswith(".json"):
+            d = json.load(open(os.path.join(RECORD_DIR,f)))
+            if d.get("manual_transcript","").strip():
+                records.append(d)
+
+    if not records:
+        raise RuntimeError("No manually-reviewed records to train on.")
+
+
+    ds  = Dataset.from_list(records).map(map_sample)
+    ds = ds.remove_columns([c for c in ds.column_names if c not in ("input_features", "labels")])
+
+    train_loader = DataLoader(
+        ds,     
+        batch_size=BATCH_SIZE,         
+        shuffle=True,
+        collate_fn=torch_collate,
     )
-    model = get_peft_model(base_model, lora_cfg)
 
-    with mlflow.start_run(run_name=run_name):
-        # Update status - training started
-        update_training_status("running", 30, f"Training iteration #{training_iteration}...")
+    # Get training iteration for tracking
+    training_iteration = increment_training_iteration()
+    print(f"\n{'='*60}")
+    print(f"TRAINING ITERATION #{training_iteration}")
+    print(f"{'='*60}\n")
+
+    for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
+    # Clean up previous model to free memory
+        if i > 1:
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif torch.backends.mps.is_available():
+                torch.mps.empty_cache()
         
-        # --- Log hyperparameters and system info
-        params = {
-            "lr"            : lr,
-            "lora_r"        : r,
-            "lora_alpha"    : alpha,
-            "lora_dropout"  : dropout,
-            "epochs"        : EPOCHS,
-            "batch_size"    : BATCH_SIZE,
-            "max_grad_norm" : MAX_GRAD_NORM,
-            "differential_privacy": ENABLE_DP,
-            "device"        : DEVICE,
-            "num_train_samples": len(records),
-            "model_name"    : MODEL_NAME,
-            "training_iteration": training_iteration
-        }
-        if ENABLE_DP:
-            params["target_eps"] = eps
-            params["target_delta"] = TARGET_DELTA
-        mlflow.log_params(params)
+        base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
 
-        # Log training metadata
-        from datetime import datetime
-        mlflow.set_tag("training_date", datetime.now().isoformat())
-        mlflow.set_tag("experiment_type", "CISK" if not ENABLE_DP else "DP")
-        mlflow.set_tag("model_type", "LoRA-Whisper")
-
-        print(f"\n=== [{run_name}] training ===")
-        print(f"Training samples: {len(records)}")
-        print(f"Device: {DEVICE}")
-        
-        final_eps = train_with_dp(
-            model=model,
-            loader=train_loader,
-            lr=lr,
-            epochs=EPOCHS,
-            target_epsilon=eps,
-            max_grad_norm=MAX_GRAD_NORM,
-        )
-
-        if ENABLE_DP and final_eps is not None:
-            print(f"Training finished.  (ε, δ)=({final_eps:.2f}, 1e-5)")
-            mlflow.log_metric("final_epsilon", final_eps)
+        # Better run naming for single runs
+        if not RUN_GRID_SEARCH:
+            run_name = f"iter_{training_iteration:03d}_{len(records)}_samples"
         else:
-            print("Training finished (no DP).")
+            run_name = f"run_{i:02d}_lr{lr}_eps{eps}_r{r}_a{alpha}_d{dropout}"
+    
+        adapter_dir = Path(ADAPTER_OUT_DIR) / run_name if RUN_GRID_SEARCH else Path(ADAPTER_OUT_DIR)
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+
+        lora_cfg = LoraConfig(
+            r           = r,
+            lora_alpha  = alpha,
+            lora_dropout= dropout,
+            target_modules=["q_proj","v_proj"],
+        )
+        model = get_peft_model(base_model, lora_cfg)
+
+        with mlflow.start_run(run_name=run_name):
+            # Update status - training started
+            update_training_status("running", 30, f"Training iteration #{training_iteration}...")
         
-        print("=== saving adapter ===")
-        model.save_pretrained(adapter_dir)
-        wer = evaluate_and_log(model, processor, records, adapter_dir) 
+            # --- Log hyperparameters and system info
+            params = {
+                "lr"            : lr,
+                "lora_r"        : r,
+                "lora_alpha"    : alpha,
+                "lora_dropout"  : dropout,
+                "epochs"        : EPOCHS,
+                "batch_size"    : BATCH_SIZE,
+                "max_grad_norm" : MAX_GRAD_NORM,
+                "differential_privacy": ENABLE_DP,
+                "device"        : DEVICE,
+                "num_train_samples": len(records),
+                "model_name"    : MODEL_NAME,
+                "training_iteration": training_iteration
+            }
+            if ENABLE_DP:
+                params["target_eps"] = eps
+                params["target_delta"] = TARGET_DELTA
+            mlflow.log_params(params)
 
-        # Log final metrics
-        mlflow.log_metric("WER", wer)
-        mlflow.log_metric("num_train_samples", len(records))
-        mlflow.log_artifacts(adapter_dir, artifact_path="lora_adapter")
+            # Log training metadata
+            from datetime import datetime
+            mlflow.set_tag("training_date", datetime.now().isoformat())
+            mlflow.set_tag("experiment_type", "CISK" if not ENABLE_DP else "DP")
+            mlflow.set_tag("model_type", "LoRA-Whisper")
 
-        # Ping backend to hot-reload the adapter
-        try:
-            backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-            requests.post(f"{backend_url}/asr/reload_adapter", timeout=5)
-            print("✓ Successfully notified backend to reload adapter")
-        except Exception as e:
-            print(f"⚠ Warning: Could not reload adapter in backend: {e}")
+            print(f"\n=== [{run_name}] training ===")
+            print(f"Training samples: {len(records)}")
+            print(f"Device: {DEVICE}")
         
-        # Print summary for students
-        print("\n" + "="*60)
-        print("TRAINING SUMMARY")
-        print("="*60)
-        print(f"Model: {MODEL_NAME}")
-        print(f"Training Mode: {'Standard PEFT (no DP)' if not ENABLE_DP else 'PEFT with Differential Privacy'}")
-        print(f"Training Samples: {len(records)}")
-        print(f"Final WER: {wer:.4f} ({wer*100:.2f}%)")
-        if ENABLE_DP and final_eps:
-            print(f"Privacy Budget: ε={final_eps:.2f}, δ={TARGET_DELTA}")
-        print(f"Adapter saved to: {adapter_dir}")
-        print(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
-        print("="*60)
+            final_eps = train_with_dp(
+                model=model,
+                loader=train_loader,
+                lr=lr,
+                epochs=EPOCHS,
+                target_epsilon=eps,
+                max_grad_norm=MAX_GRAD_NORM,
+            )
 
-    print("\n✓ Training complete!")
+            if ENABLE_DP and final_eps is not None:
+                print(f"Training finished.  (ε, δ)=({final_eps:.2f}, 1e-5)")
+                mlflow.log_metric("final_epsilon", final_eps)
+            else:
+                print("Training finished (no DP).")
+        
+            print("=== saving adapter ===")
+            model.save_pretrained(adapter_dir)
+            wer = evaluate_and_log(model, processor, records, adapter_dir) 
 
-    # Update training status to completed
-    update_training_status("completed", 100, f"Training completed successfully! WER: {wer:.4f}")
+            # Log final metrics
+            mlflow.log_metric("WER", wer)
+            mlflow.log_metric("num_train_samples", len(records))
+            mlflow.log_artifacts(adapter_dir, artifact_path="lora_adapter")
 
-    if not RUN_GRID_SEARCH:
-        print(f"\n📊 View results in MLflow UI:")
-        print(f"   mlflow ui --port 5000")
-        print(f"   Then open: http://localhost:5000")
-        print(f"\n📁 Adapter location: {ADAPTER_OUT_DIR}")
-        print("🔄 Backend has been notified to reload the model.")
+            # Ping backend to hot-reload the adapter
+            try:
+                backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+                requests.post(f"{backend_url}/asr/reload_adapter", timeout=5)
+                print("✓ Successfully notified backend to reload adapter")
+            except Exception as e:
+                print(f"⚠ Warning: Could not reload adapter in backend: {e}")
+        
+            # Print summary for students
+            print("\n" + "="*60)
+            print("TRAINING SUMMARY")
+            print("="*60)
+            print(f"Model: {MODEL_NAME}")
+            print(f"Training Mode: {'Standard PEFT (no DP)' if not ENABLE_DP else 'PEFT with Differential Privacy'}")
+            print(f"Training Samples: {len(records)}")
+            print(f"Final WER: {wer:.4f} ({wer*100:.2f}%)")
+            if ENABLE_DP and final_eps:
+                print(f"Privacy Budget: ε={final_eps:.2f}, δ={TARGET_DELTA}")
+            print(f"Adapter saved to: {adapter_dir}")
+            print(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
+            print("="*60)
+
+        print("\n✓ Training complete!")
+
+        # Update training status to completed
+        update_training_status("completed", 100, f"Training completed successfully! WER: {wer:.4f}")
+
+        if not RUN_GRID_SEARCH:
+            print(f"\n📊 View results in MLflow UI:")
+            print(f"   mlflow ui --port 5000")
+            print(f"   Then open: http://localhost:5000")
+            print(f"\n📁 Adapter location: {ADAPTER_OUT_DIR}")
+            print("🔄 Backend has been notified to reload the model.")
 
 except Exception as e:
     print(f"\n❌ Training failed with error: {e}")
