@@ -22,6 +22,7 @@ ADAPTER_DIR = Path("data/lora_output")
 WER_FILE    = Path("data/wer.txt")
 BASELINE_WER_FILE = Path("data/baseline_wer.txt")
 TRAINING_ITERATION_FILE = Path("data/training_iteration.txt")
+TRAINING_STATUS_FILE = Path("data/training_status.json")
 
 MIN_SILENCE_MS     = 2000                   # chunk params
 KEEP_SILENCE_MS    = 300
@@ -31,6 +32,10 @@ COUNTER_FILE       = Path("data/manual_review_count.txt")
 # dirs exist
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 RECORD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Initialize WER file if it doesn't exist
+if not WER_FILE.exists():
+    WER_FILE.write_text("WER: N/A\n")
 
 # Device detection: prioritize CUDA > MPS > CPU (can override with DEVICE env var)
 DEVICE = os.getenv("DEVICE")
@@ -128,6 +133,27 @@ def _reset_review_counter() -> None:
     COUNTER_FILE.write_text("0")
 
 
+def _set_training_status(status: str, progress: int = 0, message: str = ""):
+    """Update training status file."""
+    status_data = {
+        "status": status,  # "idle", "running", "completed", "failed"
+        "progress": progress,
+        "message": message,
+        "timestamp": datetime.now().isoformat()
+    }
+    TRAINING_STATUS_FILE.write_text(json.dumps(status_data))
+
+
+def _get_training_status() -> dict:
+    """Get current training status."""
+    if TRAINING_STATUS_FILE.exists():
+        try:
+            return json.loads(TRAINING_STATUS_FILE.read_text())
+        except:
+            pass
+    return {"status": "idle", "progress": 0, "message": "", "timestamp": None}
+
+
 def _split_long_chunks(chunks: List[AudioSegment], max_length_ms: int = 30000) -> List[AudioSegment]:
     """Further split chunks longer than max_length_ms into smaller chunks."""
     new_chunks = []
@@ -150,6 +176,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
+
+# Reset training status to idle on startup (in case of crash/restart with stale status)
+_set_training_status("idle", 0, "")
 
 # Check if model is cached, download if needed
 cache_dir = Path(os.getenv("HF_HOME", str(Path.home() / ".cache/huggingface")))
@@ -257,6 +286,7 @@ async def save_record(req: Request):
             print(f"Manual reviews since last retrain: {reviews}")
             if reviews >= MANUAL_RETRAIN_N:
                 print("Threshold reached – launching LoRA fine-tune ...")
+                _set_training_status("running", 0, "Auto-training started (20 corrections reached)")
                 subprocess.Popen(["python", "train_lora.py"])
                 _reset_review_counter()
 
@@ -272,6 +302,7 @@ async def save_record(req: Request):
 async def retrain_lora():
     """Trigger LoRA fine-tuning (non-blocking)."""
     print("Launching manual LoRA fine-tune ...")
+    _set_training_status("running", 0, "Training started")
     subprocess.Popen(["python", "train_lora.py"])
     return {"status": "retraining started"}
 
@@ -293,7 +324,9 @@ def get_wer():
     if WER_FILE.is_file():
         line = WER_FILE.read_text().strip()
         if line.startswith("WER:"):
-            return {"wer": line.split(":", 1)[1].strip()}
+            wer_value = line.split(":", 1)[1].strip()
+            if wer_value and wer_value != "N/A":
+                return {"wer": wer_value}
     return {"wer": None}
 
 
@@ -311,6 +344,36 @@ def get_device_info():
         device_info["cuda_device_count"] = torch.cuda.device_count()
     
     return device_info
+
+
+@app.get("/asr/model_info")
+def get_model_info():
+    """Get information about the model being used."""
+    # Check if LoRA adapter is loaded
+    required_files = ["adapter_config.json", "adapter_model.safetensors"]
+    adapter_files = [(ADAPTER_DIR / f).exists() for f in required_files]
+    has_lora = all(adapter_files)
+    
+    # Get training iteration if available
+    training_iteration = None
+    if TRAINING_ITERATION_FILE.exists():
+        try:
+            training_iteration = int(TRAINING_ITERATION_FILE.read_text().strip())
+        except:
+            pass
+    
+    return {
+        "base_model": BASE_MODEL,
+        "has_lora_adapter": has_lora,
+        "training_iteration": training_iteration,
+        "device": DEVICE,
+    }
+
+
+@app.get("/train/status")
+def get_training_status():
+    """Get current training status."""
+    return _get_training_status()
 
 
 @app.get("/audio/{fname}")

@@ -10,7 +10,9 @@
   let notification='', notifType='success', showNotif=false;
   let manual:Record<string,string>={}, reviewed:Record<string,boolean>={}, saving:Record<string,boolean>={};
   let originalManual:Record<string,string>={}; // Track original values to detect changes
-  let wer='';
+  let wer='N/A';
+  let modelInfo:any = null;
+  let trainingStatus:any = {status: 'idle', progress: 0, message: ''};
   let isRecording=false, chunks:Blob[]=[], recorder:MediaRecorder|null=null;
   let uploadProgress=false;
   let trainingInProgress=false;
@@ -45,11 +47,41 @@
   async function fetchWER(){ 
     try {
       const data = await getJSON(`${BACKEND_URL}/asr/wer`);
-      wer = data.wer || 'Not calculated yet';
+      wer = data.wer || 'N/A';
     } catch(e) {
       console.error('Failed to fetch WER:', e);
     }
   }
+  
+  async function fetchModelInfo(){
+    try {
+      modelInfo = await getJSON(`${BACKEND_URL}/asr/model_info`);
+    } catch(e) {
+      console.error('Failed to fetch model info:', e);
+    }
+  }
+  
+  async function fetchTrainingStatus(){
+    try {
+      const status = await getJSON(`${BACKEND_URL}/train/status`);
+      const wasTraining = trainingInProgress;
+      trainingInProgress = status.status === 'running';
+      trainingStatus = status;
+      
+      // Show notification when training completes
+      if (wasTraining && status.status === 'completed') {
+        toast('✅ Training completed successfully!', 'success');
+        await fetchWER();
+        await fetchModelInfo();
+        await load();
+      } else if (wasTraining && status.status === 'failed') {
+        toast('❌ Training failed', 'error');
+      }
+    } catch(e) {
+      console.error('Failed to fetch training status:', e);
+    }
+  }
+  
   async function load(){
     loading=true; err='';
     try{
@@ -156,21 +188,24 @@
   async function triggerManualRetrain() {
     if (trainingInProgress) return;
     trainingInProgress = true;
-    toast('Starting training... This may take several minutes.');
+    toast('Starting training... This may take several minutes.', 'success');
     try {
       await getJSON(`${BACKEND_URL}/train/retrain_lora`);
-      toast('Training started in background');
+      // Don't set trainingInProgress to false - let the status polling handle it
     } catch(e) {
       toast('Failed to start training', 'error');
-    } finally {
       trainingInProgress = false;
     }
   }
 
   onMount(()=>{ 
     load(); 
-    fetchWER(); 
-    setInterval(fetchWER, WER_POLL_INTERVAL); 
+    fetchWER();
+    fetchModelInfo();
+    fetchTrainingStatus();
+    setInterval(fetchWER, WER_POLL_INTERVAL);
+    setInterval(fetchModelInfo, WER_POLL_INTERVAL); // Poll model info alongside WER
+    setInterval(fetchTrainingStatus, 5000); // Poll training status more frequently (every 5s)
   });
 
   const fmt=t=>t?.replace('T',' ').replace('Z','').slice(0,19);
@@ -178,6 +213,20 @@
 
 <h1>ASR Annotation System</h1>
 <p class="subtitle">Transcription & Model Training</p>
+
+{#if modelInfo}
+  <div class="model-info-banner">
+    <span class="model-name">🤖 Model: <strong>{modelInfo.base_model}</strong></span>
+    <span class="model-status">
+      {#if modelInfo.has_lora_adapter}
+        ✅ LoRA Fine-tuned {modelInfo.training_iteration ? `(Iteration #${modelInfo.training_iteration})` : ''}
+      {:else}
+        🔵 Base Model (No Fine-tuning)
+      {/if}
+    </span>
+    <span class="device-info">💻 {modelInfo.device.toUpperCase()}</span>
+  </div>
+{/if}
 
 <div class="control-panel">
   <div class="audio-section">
@@ -213,9 +262,27 @@
     <button class="button train-btn" on:click={triggerManualRetrain} disabled={trainingInProgress}>
       {trainingInProgress ? '⏳ Training...' : '🔄 Manual Retrain'}
     </button>
-    <small>Auto-retrains after 20 corrections</small>
+    {#if trainingInProgress && trainingStatus.message}
+      <small class="training-status">{trainingStatus.message}</small>
+    {:else}
+      <small>Auto-retrains after 20 corrections</small>
+    {/if}
   </div>
 </div>
+
+{#if trainingInProgress}
+  <div class="training-progress-banner">
+    <div class="spinner-small"></div>
+    <div class="training-info">
+      <strong>Training in Progress</strong>
+      <span>{trainingStatus.message || 'Training the model...'}</span>
+    </div>
+    <div class="progress-bar-inline">
+      <div class="progress-fill" style="width: {trainingStatus.progress || 0}%"></div>
+    </div>
+    <span class="progress-text">{trainingStatus.progress || 0}%</span>
+  </div>
+{/if}
 
 {#if loading}
   <div class="loading-state">

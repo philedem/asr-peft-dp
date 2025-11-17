@@ -44,6 +44,45 @@ h1 {
   text-transform: uppercase;
 }
 
+/* Model Info Banner */
+.model-info-banner {
+  background: var(--midlaier-dark);
+  border: 1px solid var(--midlaier-gray);
+  border-left: 3px solid var(--midlaier-teal);
+  padding: 1em 1.5em;
+  margin-bottom: 1.5em;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1em;
+  font-size: 0.9em;
+}
+
+.model-info-banner .model-name {
+  color: var(--text-secondary);
+  font-size: 0.95em;
+}
+
+.model-info-banner .model-name strong {
+  color: var(--midlaier-teal);
+  font-weight: 600;
+}
+
+.model-info-banner .model-status {
+  color: var(--text-primary);
+  padding: 0.3em 0.8em;
+  background: var(--midlaier-gray);
+  border-radius: 2px;
+  font-size: 0.85em;
+}
+
+.model-info-banner .device-info {
+  color: var(--text-secondary);
+  font-size: 0.85em;
+  letter-spacing: 0.05em;
+}
+
 /* Control Panel */
 .control-panel {
   background: var(--midlaier-dark);
@@ -306,6 +345,86 @@ h1 {
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
+}
+
+/* Training Progress Banner (non-blocking) */
+.training-progress-banner {
+  background: var(--midlaier-dark);
+  border: 2px solid var(--midlaier-teal);
+  border-left: 4px solid var(--midlaier-teal);
+  padding: 1em 1.5em;
+  margin-bottom: 1.5em;
+  display: flex;
+  align-items: center;
+  gap: 1.5em;
+  box-shadow: 0 0 20px rgba(0, 212, 170, 0.2);
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-left-color: var(--midlaier-teal); }
+  50% { border-left-color: rgba(0, 212, 170, 0.5); }
+}
+
+.spinner-small {
+  border: 3px solid var(--midlaier-gray);
+  border-top: 3px solid var(--midlaier-teal);
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  flex-shrink: 0;
+}
+
+.training-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  flex: 1;
+}
+
+.training-info strong {
+  color: var(--midlaier-teal);
+  font-size: 1em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.training-info span {
+  color: var(--text-secondary);
+  font-size: 0.85em;
+}
+
+.progress-bar-inline {
+  width: 200px;
+  height: 6px;
+  background: var(--midlaier-gray);
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--midlaier-teal);
+  transition: width 0.5s ease;
+  box-shadow: 0 0 10px var(--midlaier-teal);
+}
+
+.progress-text {
+  color: var(--midlaier-teal);
+  font-weight: 700;
+  font-size: 0.9em;
+  min-width: 45px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.training-status {
+  color: var(--midlaier-teal);
+  font-size: 0.85em;
+  display: block;
+  margin-top: 0.5em;
 }
 
 /* Notifications */

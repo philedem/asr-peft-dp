@@ -40,6 +40,8 @@ RECORD_DIR      = "data/records"
 AUDIO_DIR       = "data/audio"
 ADAPTER_OUT_DIR = "data/lora_output"
 ITERATION_FILE  = "data/training_iteration.txt"
+WER_FILE        = "data/wer.txt"
+STATUS_FILE     = "data/training_status.json"
 
 # Feature flag: Enable/disable differential privacy
 # Set ENABLE_DIFFERENTIAL_PRIVACY=false to disable DP (for CISK experiment)
@@ -89,6 +91,17 @@ def increment_training_iteration():
     iteration = get_training_iteration() + 1
     Path(ITERATION_FILE).write_text(str(iteration))
     return iteration
+
+def update_training_status(status: str, progress: int = 0, message: str = ""):
+    """Update training status file."""
+    from datetime import datetime
+    status_data = {
+        "status": status,  # "idle", "running", "completed", "failed"
+        "progress": progress,
+        "message": message,
+        "timestamp": datetime.now().isoformat()
+    }
+    Path(STATUS_FILE).write_text(json.dumps(status_data))
 
 def collate_fn(batch, processor, bos_id):
     input_features = [{"input_features": b["input_features"]} for b in batch]
@@ -164,7 +177,8 @@ def evaluate_and_log(model, processor, records, out_dir):
 
     wer = jiwer.wer(refs, preds)
     
-    # Write detailed WER report
+    # Write WER to both locations for compatibility
+    # 1. In the adapter directory (for experiment tracking)
     with open(Path(out_dir) / "wer.txt", "w") as f:
         from datetime import datetime
         f.write(f"=== WER Evaluation Report ===\n")
@@ -176,6 +190,10 @@ def evaluate_and_log(model, processor, records, out_dir):
             f.write(f"\nSample {i+1}:\n")
             f.write(f"  Reference:  {refs[i]}\n")
             f.write(f"  Prediction: {preds[i]}\n")
+    
+    # 2. In the main data directory (for frontend display)
+    with open(WER_FILE, "w") as f:
+        f.write(f"WER: {wer:.4f} ({wer*100:.2f}%)\n")
     
     print(f"WER: {wer:.4f} ({wer*100:.2f}%)")
     return wer
@@ -251,12 +269,16 @@ grid = list(product(lrs, target_epsilons,
                     lora_rs, lora_alphas, lora_dropouts))
 print(f"{len(grid)} configs to run")
 
-# Set MLflow experiment name based on DP mode
-experiment_name = "CISK-PEFT-FineTuning" if not ENABLE_DP else "Whisper-LoRA-DP"
-mlflow.set_experiment(experiment_name)
-print(f"MLflow experiment: {experiment_name}")
+try:
+    # Update training status
+    update_training_status("running", 10, "Loading model and preparing data...")
 
-warnings.filterwarnings("ignore", category=UserWarning)
+    # Set MLflow experiment name based on DP mode
+    experiment_name = "CISK-PEFT-FineTuning" if not ENABLE_DP else "Whisper-LoRA-DP"
+    mlflow.set_experiment(experiment_name)
+    print(f"MLflow experiment: {experiment_name}")
+
+    warnings.filterwarnings("ignore", category=UserWarning)
 
 print("Loading Whisper processor and base model...")
 processor  = WhisperProcessor.from_pretrained(MODEL_NAME)
@@ -322,6 +344,9 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
     model = get_peft_model(base_model, lora_cfg)
 
     with mlflow.start_run(run_name=run_name):
+        # Update status - training started
+        update_training_status("running", 30, f"Training iteration #{training_iteration}...")
+        
         # --- Log hyperparameters and system info
         params = {
             "lr"            : lr,
@@ -398,10 +423,21 @@ for i, (lr, eps, r, alpha, dropout) in enumerate(grid, 1):
         print(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
         print("="*60)
 
-print("\n✓ Training complete!")
-if not RUN_GRID_SEARCH:
-    print(f"\n📊 View results in MLflow UI:")
-    print(f"   mlflow ui --port 5000")
-    print(f"   Then open: http://localhost:5000")
-    print(f"\n📁 Adapter location: {ADAPTER_OUT_DIR}")
-    print("🔄 Backend has been notified to reload the model.")
+    print("\n✓ Training complete!")
+
+    # Update training status to completed
+    update_training_status("completed", 100, f"Training completed successfully! WER: {wer:.4f}")
+
+    if not RUN_GRID_SEARCH:
+        print(f"\n📊 View results in MLflow UI:")
+        print(f"   mlflow ui --port 5000")
+        print(f"   Then open: http://localhost:5000")
+        print(f"\n📁 Adapter location: {ADAPTER_OUT_DIR}")
+        print("🔄 Backend has been notified to reload the model.")
+
+except Exception as e:
+    print(f"\n❌ Training failed with error: {e}")
+    import traceback
+    traceback.print_exc()
+    update_training_status("failed", 0, f"Training failed: {str(e)}")
+    raise
