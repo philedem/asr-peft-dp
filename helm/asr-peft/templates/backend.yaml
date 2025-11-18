@@ -31,6 +31,8 @@ spec:
           value: {{ .Values.backend.env.enableDifferentialPrivacy | quote }}
         - name: HF_HOME
           value: {{ .Values.backend.env.hfHome | quote }}
+        - name: MLFLOW_TRACKING_URI
+          value: {{ .Values.backend.env.mlflowTrackingUri | default "http://mlflow:5000" | quote }}
         resources:
           {{- toYaml .Values.backend.resources | nindent 10 }}
         volumeMounts:

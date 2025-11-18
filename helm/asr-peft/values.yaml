@@ -32,6 +32,7 @@ backend:
   env:
     enableDifferentialPrivacy: "false"
     hfHome: "/workspace/.cache/huggingface"
+    mlflowTrackingUri: "http://asr-peft-mlflow:5000"
   runtimeClassName: nvidia  # Use NVIDIA container runtime for GPU access
 
 # Frontend configuration

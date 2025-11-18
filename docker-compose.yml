@@ -7,9 +7,21 @@ services:
     volumes:
       - ./backend/data:/workspace/data
       - huggingface-cache:/workspace/.cache/huggingface  # Cache models across rebuilds
+      - mlflow-data:/mlflow  # Share MLflow artifacts with mlflow service
     environment:
       - PYTHONUNBUFFERED=1
       - ENABLE_DIFFERENTIAL_PRIVACY=false  # Set to 'true' to enable DP for training
+      - MLFLOW_TRACKING_URI=http://asr-peft-mlflow:5000  # Point to MLflow tracking server
+  
+  asr-peft-mlflow:
+    build: ./mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow  # Persistent storage for experiments and artifacts
+    environment:
+      - PYTHONUNBUFFERED=1
+  
   frontend:
     build: ./frontend
     ports:
@@ -21,3 +33,4 @@ services:
 
 volumes:
   huggingface-cache:  # Named volume for model cache persistence
+  mlflow-data:  # Named volume for MLflow tracking data
