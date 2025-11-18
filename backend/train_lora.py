@@ -5,8 +5,9 @@ writes WER, pings backend to reload.
 
 import os, json, torch, requests, warnings
 from datasets import Dataset
-import torchaudio, jiwer, torch
+import jiwer
 import soundfile as sf
+import librosa
 from transformers import (
     WhisperProcessor, WhisperForConditionalGeneration,
     Seq2SeqTrainer, Seq2SeqTrainingArguments
@@ -35,6 +36,10 @@ else:
     else:
         DEVICE = "cpu"
     print(f"Auto-detected device: {DEVICE}")
+
+# Use the detected device for training (NGC PyTorch 25.09 supports GB10/Blackwell)
+TRAINING_DEVICE = DEVICE
+print(f"Training will use: {TRAINING_DEVICE}")
 
 RECORD_DIR      = "data/records"
 AUDIO_DIR       = "data/audio"
@@ -123,20 +128,24 @@ def collate_fn(batch, processor, bos_id):
 
 
 def map_sample(batch):
-    # Use soundfile directly to avoid torchaudio 2.9+ breaking changes
+    # Use soundfile to load audio
     wav, sr = sf.read(os.path.join(AUDIO_DIR, batch["audio_file"]))
-    wav = torch.from_numpy(wav).float()
     
-    # Ensure we have the right shape [channels, samples]
+    # Resample if needed using librosa
+    if sr != 16000:
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
+    
+    # Convert to torch tensor and ensure correct shape
+    wav = torch.from_numpy(wav).float()
     if wav.ndim == 1:
         wav = wav.unsqueeze(0)
     else:
         wav = wav.T  # soundfile returns [samples, channels], we need [channels, samples]
     
-    if sr != 16000:
-        wav = torchaudio.transforms.Resample(sr, 16000)(wav)
+    # Convert stereo to mono if needed
     if wav.shape[0] > 1:
         wav = wav.mean(dim=0, keepdim=True)
+    
     # Whisper: input_features, labels
     batch["input_features"] = processor(
         wav.squeeze().numpy(), sampling_rate=16000, return_tensors="pt"
@@ -147,20 +156,24 @@ def map_sample(batch):
 
 def evaluate_and_log(model, processor, records, out_dir):
     def transcribe(path):
-        # Use soundfile directly to avoid torchaudio 2.9+ breaking changes
+        # Use soundfile to load audio
         wav, sr = sf.read(str(path))
-        wav = torch.from_numpy(wav).float()
         
-        # Ensure we have the right shape [channels, samples]
+        # Resample if needed using librosa
+        if sr != 16000:
+            wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
+        
+        # Convert to torch tensor and ensure correct shape
+        wav = torch.from_numpy(wav).float()
         if wav.ndim == 1:
             wav = wav.unsqueeze(0)
         else:
             wav = wav.T  # soundfile returns [samples, channels], we need [channels, samples]
         
-        if sr != 16000:
-            wav = torchaudio.transforms.Resample(sr,16000)(wav)
+        # Convert stereo to mono if needed
         if wav.shape[0] > 1:
             wav = wav.mean(0, keepdim=True)
+        
         feats = processor(wav.squeeze().numpy(), sampling_rate=16000,
                           return_tensors="pt").input_features.to(DEVICE)
         ids = model.generate(
@@ -202,12 +215,14 @@ def train_with_dp(
         model, loader, lr=5e-5, epochs=3,
         target_epsilon=5.0, target_delta=1e-5,
         max_grad_norm=1.0,
-        device=DEVICE
+        device=None
 ):
     """
     Train model with optional differential privacy.
     If ENABLE_DP=False, uses standard training without privacy guarantees.
     """
+    if device is None:
+        device = TRAINING_DEVICE
     model.to(device)
     model.train()
 
@@ -282,7 +297,7 @@ try:
 
     print("Loading Whisper processor and base model...")
     processor  = WhisperProcessor.from_pretrained(MODEL_NAME)
-    base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
+    base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(TRAINING_DEVICE)
 
     bos_id = base_model.generation_config.decoder_start_token_id
     torch_collate = partial(collate_fn, processor=processor, bos_id=bos_id)
@@ -324,7 +339,7 @@ try:
             elif torch.backends.mps.is_available():
                 torch.mps.empty_cache()
         
-        base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
+        base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(TRAINING_DEVICE)
 
         # Better run naming for single runs
         if not RUN_GRID_SEARCH:
@@ -357,7 +372,7 @@ try:
                 "batch_size"    : BATCH_SIZE,
                 "max_grad_norm" : MAX_GRAD_NORM,
                 "differential_privacy": ENABLE_DP,
-                "device"        : DEVICE,
+                "device"        : TRAINING_DEVICE,
                 "num_train_samples": len(records),
                 "model_name"    : MODEL_NAME,
                 "training_iteration": training_iteration
@@ -375,7 +390,7 @@ try:
 
             print(f"\n=== [{run_name}] training ===")
             print(f"Training samples: {len(records)}")
-            print(f"Device: {DEVICE}")
+            print(f"Device: {TRAINING_DEVICE}")
         
             final_eps = train_with_dp(
                 model=model,

@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
 
-import torchaudio
 import soundfile as sf
 import numpy as np
 from pydub import AudioSegment, silence
@@ -12,9 +11,8 @@ import torch
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
+from transformers import WhisperProcessor, WhisperForConditionalGeneration, pipeline
 from peft import PeftModel
-from faster_whisper import WhisperModel
 
 # ───────────────────────────── configuration ──────────────────────────────
 AUDIO_DIR   = Path("data/audio")
@@ -76,20 +74,11 @@ def _attach_lora(base) -> WhisperForConditionalGeneration:
     return base
 
 def _transcribe_wav(path: Path) -> str:
-    """Blocking whisper inference using faster-whisper (GPU-compatible with sm_121)."""
+    """Whisper inference using transformers with LoRA support."""
     try:
-        # faster-whisper handles audio loading and preprocessing internally
-        segments, info = faster_whisper_model.transcribe(
-            str(path),
-            language="no",
-            task="transcribe",
-            beam_size=5,
-            vad_filter=False,
-        )
-        
-        # Combine all segments into single transcription
-        transcription = " ".join([segment.text for segment in segments]).strip()
-        return transcription
+        # Use the ASR pipeline with the model that has LoRA loaded
+        result = asr_pipeline(str(path), generate_kwargs={"language": "norwegian", "task": "transcribe"})
+        return result["text"].strip()
         
     except Exception as e:
         print(f"Error transcribing {path}: {e}")
@@ -187,25 +176,25 @@ else:
     print(f"Model not cached. Downloading {BASE_MODEL} to {cache_dir}...")
     print("This is a one-time download (~1.5GB) and will be cached for future use.")
 
-# Initialize faster-whisper for GPU inference (works with sm_121/GB10)
-print(f"Loading faster-whisper model ({BASE_MODEL}) for GPU inference...")
-compute_type = "float16" if DEVICE == "cuda" else "int8"
-faster_whisper_model = WhisperModel(
-    BASE_MODEL,
-    device=DEVICE,
-    compute_type=compute_type,
-    download_root=cache_dir
-)
-print(f"✓ faster-whisper loaded on {DEVICE} with compute_type={compute_type}")
-
-# Also load transformers model for training (LoRA fine-tuning)
-print(f"Loading transformers model ({BASE_MODEL}) for LoRA training...")
+# Load transformers model for both inference and training
+print(f"Loading Whisper model ({BASE_MODEL}) for inference and training...")
 processor: WhisperProcessor = WhisperProcessor.from_pretrained(BASE_MODEL)
 _base = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL).to(DEVICE)
 
+# Apply LoRA adapter if available
 model = _attach_lora(_base)
-MODEL_LOCK = asyncio.Lock()                 # serialise GPU access
-print(f"✓ Training model loaded (LoRA adapter will be applied if available)")
+
+# Create ASR pipeline for inference
+asr_pipeline = pipeline(
+    "automatic-speech-recognition",
+    model=model,
+    tokenizer=processor.tokenizer,
+    feature_extractor=processor.feature_extractor,
+    device=DEVICE,
+)
+
+MODEL_LOCK = asyncio.Lock()  # serialise GPU access
+print(f"✓ Model loaded on {DEVICE} with LoRA adapter (if available)")
 
 # ───────── 1. receive stream/blob -> chunk -> transcribe ──────────
 @app.post("/asr/transcribe")
