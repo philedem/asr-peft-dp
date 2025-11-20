@@ -1,0 +1,47 @@
+# Helm values override for Spark2 cluster (172.16.50.85)
+
+# Backend configuration
+backend:
+  service:
+    nodePort: 30800
+  env:
+    mlflowTrackingUri: "http://asr-peft-mlflow:5000"
+  runtimeClassName: nvidia  # Required for GPU access on k3s
+
+# Ingress configuration - update for Spark2 IP
+ingress:
+  enabled: true
+  enableBackend: false  # Backend uses NodePort
+  hosts:
+    frontend:
+      host: asr.172.16.50.85.nip.io
+      paths:
+        - path: /
+          pathType: Prefix
+    backend:
+      host: asr-api.172.16.50.85.nip.io
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: midlaier-tls
+      hosts:
+        - asr.172.16.50.85.nip.io
+
+# Backend URL for frontend (NodePort on Spark2)
+backendUrl: "http://172.16.50.85:30800"
+
+# Persistence configuration
+persistence:
+  data:
+    enabled: true
+    storageClass: "local-path"  # k3s default
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    existingClaim: ""
+  hfCache:
+    enabled: true
+    storageClass: "local-path"  # k3s default
+    accessMode: ReadWriteOnce
+    size: 20Gi
+    existingClaim: ""
