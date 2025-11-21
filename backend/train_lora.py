@@ -290,7 +290,28 @@ try:
 
     # Set MLflow experiment name based on DP mode
     experiment_name = "CISK-PEFT-FineTuning" if not ENABLE_DP else "Whisper-LoRA-DP"
-    mlflow.set_experiment(experiment_name)
+    
+    # Try to set experiment, handle deleted experiments
+    try:
+        mlflow.set_experiment(experiment_name)
+    except mlflow.exceptions.MlflowException as e:
+        if "deleted experiment" in str(e):
+            print(f"⚠️  Experiment '{experiment_name}' was deleted. Restoring it...")
+            # Get the experiment by name (even if deleted)
+            client = mlflow.tracking.MlflowClient()
+            experiment = client.get_experiment_by_name(experiment_name)
+            if experiment:
+                # Restore the deleted experiment
+                client.restore_experiment(experiment.experiment_id)
+                print(f"✓ Restored experiment '{experiment_name}'")
+                mlflow.set_experiment(experiment_name)
+            else:
+                # If not found at all, create new one
+                print(f"Creating new experiment '{experiment_name}'")
+                mlflow.set_experiment(experiment_name)
+        else:
+            raise
+    
     print(f"MLflow experiment: {experiment_name}")
 
     warnings.filterwarnings("ignore", category=UserWarning)
