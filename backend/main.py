@@ -26,6 +26,7 @@ TRAINING_STATUS_FILE = Path("data/training_status.json")
 MIN_SILENCE_MS     = 2000                   # chunk params
 KEEP_SILENCE_MS    = 300
 MANUAL_RETRAIN_N   = 20                      # reviewed chunks before retrain
+AUTO_RETRAIN_ENABLED = False                 # set to False to disable auto-retraining
 COUNTER_FILE       = Path("data/manual_review_count.txt")
 
 # dirs exist
@@ -284,11 +285,13 @@ async def save_record(req: Request):
         if record["manual_transcript"] and record["manual_transcript"] != record["asr_transcript"]:
             reviews = _increment_review_counter()
             print(f"Manual reviews since last retrain: {reviews}")
-            if reviews >= MANUAL_RETRAIN_N:
+            if AUTO_RETRAIN_ENABLED and reviews >= MANUAL_RETRAIN_N:
                 print("Threshold reached – launching LoRA fine-tune ...")
                 _set_training_status("running", 0, "Auto-training started (20 corrections reached)")
                 subprocess.Popen(["/usr/bin/python3.12", "train_lora.py"])
                 _reset_review_counter()
+            elif not AUTO_RETRAIN_ENABLED:
+                print("Auto-retraining is disabled. Use manual retrain button to start training.")
 
         return {"ok": True}
     
@@ -305,6 +308,19 @@ async def retrain_lora():
     _set_training_status("running", 0, "Training started")
     subprocess.Popen(["/usr/bin/python3.12", "train_lora.py"])
     return {"status": "retraining started"}
+
+@app.get("/train/calculate_wer")
+async def calculate_wer_only():
+    """Calculate WER without retraining - for benchmarking."""
+    print("Calculating WER without training...")
+    _set_training_status("running", 0, "Calculating WER...")
+    try:
+        # Run a Python script that calculates WER only
+        subprocess.Popen(["/usr/bin/python3.12", "calculate_wer_only.py"])
+        return {"status": "wer_calculation_started"}
+    except Exception as e:
+        _set_training_status("failed", 0, f"WER calculation failed: {str(e)}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 # ───────── 3. list records, WER, serve audio ───────────
 @app.get("/asr/records")
@@ -355,11 +371,14 @@ def delete_record(record_id: str):
 @app.get("/asr/wer")
 def get_wer():
     if WER_FILE.is_file():
-        line = WER_FILE.read_text().strip()
-        if line.startswith("WER:"):
-            wer_value = line.split(":", 1)[1].strip()
-            if wer_value and wer_value != "N/A":
-                return {"wer": wer_value}
+        content = WER_FILE.read_text().strip()
+        # Parse multi-line format - look for line starting with "WER:"
+        for line in content.split('\n'):
+            line = line.strip()
+            if line.startswith("WER:"):
+                wer_value = line.split(":", 1)[1].strip()
+                if wer_value and wer_value != "N/A":
+                    return {"wer": wer_value}
     return {"wer": None}
 
 

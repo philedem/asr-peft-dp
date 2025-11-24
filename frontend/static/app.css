@@ -217,6 +217,16 @@ h1 {
   cursor: pointer;
 }
 
+.wer-btn {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+.wer-btn:hover:not(:disabled) {
+  background: transparent;
+  color: var(--success);
+}
+
 .train-btn {
   background: var(--success);
   border-color: var(--success);

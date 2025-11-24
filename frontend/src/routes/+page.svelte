@@ -221,6 +221,49 @@
     }
   }
 
+  async function calculateWEROnly() {
+    if (trainingInProgress) return;
+    
+    // Check if there are any reviewed records
+    const reviewedCount = Object.values(reviewed).filter(Boolean).length;
+    if (reviewedCount === 0) {
+      toast('No reviewed records to calculate WER. Please review at least one record.', 'error');
+      return;
+    }
+    
+    trainingInProgress = true;
+    toast('Calculating WER...', 'success');
+    try {
+      await getJSON(`${BACKEND_URL}/train/calculate_wer`);
+      
+      // Poll for completion and update WER
+      const pollCompletion = async () => {
+        for (let i = 0; i < 20; i++) { // Poll for up to 10 seconds
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const status = await getJSON(`${BACKEND_URL}/train/status`);
+          if (status.status === 'completed') {
+            trainingInProgress = false;
+            await fetchWER();
+            toast('✅ WER calculation completed!', 'success');
+            return;
+          } else if (status.status === 'failed') {
+            trainingInProgress = false;
+            toast('❌ WER calculation failed', 'error');
+            return;
+          }
+        }
+        // Fallback: assume it completed if we timed out
+        trainingInProgress = false;
+        await fetchWER();
+      };
+      pollCompletion();
+      
+    } catch(e) {
+      toast('Failed to start WER calculation', 'error');
+      trainingInProgress = false;
+    }
+  }
+
   onMount(()=>{ 
     load(); 
     fetchWER();
@@ -282,13 +325,16 @@
   </div>
 
   <div class="training-section">
+    <button class="button wer-btn" on:click={calculateWEROnly} disabled={trainingInProgress}>
+      {trainingInProgress && trainingStatus.message && trainingStatus.message.includes('WER') ? '⏳ Calculating...' : '📊 Calculate WER'}
+    </button>
     <button class="button train-btn" on:click={triggerManualRetrain} disabled={trainingInProgress}>
-      {trainingInProgress ? '⏳ Training...' : '🔄 Manual Retrain'}
+      {trainingInProgress && !trainingStatus.message?.includes('WER') ? '⏳ Training...' : '🔄 Retrain Model'}
     </button>
     {#if trainingInProgress && trainingStatus.message}
       <small class="training-status">{trainingStatus.message}</small>
     {:else}
-      <small>Auto-retrains after 20 corrections</small>
+      <small>Calculate WER for benchmark, or retrain to improve the model</small>
     {/if}
   </div>
 </div>
