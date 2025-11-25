@@ -1,9 +1,15 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { fly }     from 'svelte/transition';
 
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
   const WER_POLL_INTERVAL = import.meta.env.VITE_WER_POLL_INTERVAL || 70000;
+  const WHISPERLIVE_WS_URL = import.meta.env.VITE_WHISPERLIVE_WS_URL || 'ws://localhost:9090';
+  
+  // Feature flags
+  const ENABLE_TRAINING = import.meta.env.VITE_ENABLE_TRAINING !== 'false';
+  const ENABLE_STREAMING = import.meta.env.VITE_ENABLE_STREAMING === 'true';
+  const ENABLE_BATCH_UPLOAD = import.meta.env.VITE_ENABLE_BATCH_UPLOAD !== 'false';
 
   let records:any[] = [];
   let loading=false, err='';
@@ -18,6 +24,15 @@
   let trainingInProgress=false;
   let audioDevices:MediaDeviceInfo[]=[];
   let selectedDeviceId:string='';
+
+  // WhisperLive streaming state
+  let isStreaming=false, streamingWS:WebSocket|null=null;
+  let streamRecorder:MediaRecorder|null=null, streamAudioContext:AudioContext|null=null;
+  let currentStreamTranscript='', streamingChunks:Blob[]=[];
+  let streamingStats:any = null;
+  let rtspUrl:string = '';
+  let useRTSP:boolean = false;
+  let lastWSMessage:string = ''; // Debug: last WebSocket message received
 
   const toast=(m:string,t='success')=>{
     notification=m; notifType=t; showNotif=true;
@@ -48,8 +63,14 @@
 
   async function fetchWER(){ 
     try {
-      const data = await getJSON(`${BACKEND_URL}/asr/wer`);
-      wer = data.wer || 'N/A';
+      const endpoint = ENABLE_STREAMING ? `${BACKEND_URL}/corrections/stats` : `${BACKEND_URL}/asr/wer`;
+      const data = await getJSON(endpoint);
+      if (ENABLE_STREAMING) {
+        wer = data.average_wer != null ? data.average_wer.toFixed(2) + '%' : 'N/A';
+        streamingStats = data;
+      } else {
+        wer = data.wer || 'N/A';
+      }
     } catch(e) {
       console.error('Failed to fetch WER:', e);
     }
@@ -230,6 +251,242 @@
     await save(r, true); // Force save even if value hasn't changed
   };
 
+  // ---------- WhisperLive Streaming ----------
+  async function toggleStreaming() {
+    console.log('toggleStreaming called, isStreaming:', isStreaming);
+    if (!isStreaming) {
+      await startStreaming();
+    } else {
+      stopStreaming();
+    }
+  }
+
+  async function startStreaming() {
+    console.log('startStreaming called, useRTSP:', useRTSP, 'rtspUrl:', rtspUrl);
+    try {
+      currentStreamTranscript = '';
+      streamingChunks = [];
+      
+      // If RTSP is selected, send URL to backend for processing
+      if (useRTSP && rtspUrl.trim()) {
+        await startRTSPStreaming();
+        return;
+      }
+      
+      // Otherwise use microphone (original behavior)
+      await startMicrophoneStreaming();
+    } catch (e) {
+      console.error('Failed to start streaming:', e);
+      toast('Failed to start streaming: ' + e.message, 'error');
+      stopStreaming();
+    }
+  }
+
+  async function startRTSPStreaming() {
+    // Connect to WhisperLive WebSocket
+    streamingWS = new WebSocket(WHISPERLIVE_WS_URL);
+    
+    streamingWS.onopen = () => {
+      console.log('Connected to WhisperLive server for RTSP');
+      
+      // Send RTSP stream config
+      const config = {
+        uid: 'rtsp-client-' + Date.now(),
+        language: 'no',
+        task: 'transcribe',
+        model: 'NbAiLab/nb-whisper-medium',
+        use_vad: false,  // Disabled VAD temporarily - it was filtering out all audio
+        device: 'cuda',
+        compute_type: 'float16',
+        rtsp_url: rtspUrl
+      };
+      streamingWS?.send(JSON.stringify(config));
+      isStreaming = true;
+      toast('🎥 RTSP streaming started', 'success');
+    };
+    
+    streamingWS.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log('📩 [RTSP] Received WebSocket message:', data);
+        
+        if (data.message === 'SERVER_READY') {
+          console.log('✅ Server is ready');
+        } else if (data.segments && data.segments.length > 0) {
+          console.log('📝 [RTSP] Transcription segments:', data.segments);
+          currentStreamTranscript = data.segments.map(s => s.text).join(' ');
+          console.log('[RTSP] Updated transcript:', currentStreamTranscript);
+        } else {
+          console.log('ℹ️ [RTSP] Message without segments:', data);
+        }
+      } catch (e) {
+        console.error('[RTSP] Error parsing WebSocket message:', e, 'Raw data:', event.data);
+      }
+    };
+    
+    streamingWS.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      toast('RTSP streaming connection error', 'error');
+      stopStreaming();
+    };
+    
+    streamingWS.onclose = () => {
+      console.log('WebSocket closed');
+      if (isStreaming) {
+        stopStreaming();
+      }
+    };
+  }
+
+  async function startMicrophoneStreaming() {
+    // Connect to WhisperLive WebSocket
+    streamingWS = new WebSocket(WHISPERLIVE_WS_URL);
+    
+    streamingWS.onopen = async () => {
+      console.log('Connected to WhisperLive server');
+      
+      // Send connection config
+      const config = {
+        uid: 'web-client-' + Date.now(),
+        language: 'no', // Norwegian
+        task: 'transcribe',
+        model: 'NbAiLab/nb-whisper-medium',
+        use_vad: false,  // Disabled VAD temporarily - it was filtering out all audio
+        device: 'cuda',
+        compute_type: 'float16'
+      };
+      streamingWS?.send(JSON.stringify(config));
+      
+      // Start capturing audio with proper format for WhisperLive
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      });
+      
+      streamAudioContext = new AudioContext({ sampleRate: 16000 });
+      const source = streamAudioContext.createMediaStreamSource(stream);
+      
+      // Create ScriptProcessor to get raw PCM audio data
+      const processor = streamAudioContext.createScriptProcessor(4096, 1, 1);
+      
+      processor.onaudioprocess = (e) => {
+        if (streamingWS?.readyState === WebSocket.OPEN) {
+          // Get raw PCM float32 audio data
+          const inputData = e.inputBuffer.getChannelData(0);
+          
+          // Convert float32 to int16 PCM (what WhisperLive expects)
+          const int16Data = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            const s = Math.max(-1, Math.min(1, inputData[i]));
+            int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          
+          // Send raw PCM data
+          streamingWS?.send(int16Data.buffer);
+        }
+      };
+      
+      source.connect(processor);
+      processor.connect(streamAudioContext.destination);
+      
+      // Store processor for cleanup
+      (window as any).audioProcessor = processor;
+      
+      isStreaming = true;
+      toast('🎙️ Streaming started', 'success');
+    };
+    
+    streamingWS.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log('📩 Received WebSocket message:', data);
+        lastWSMessage = JSON.stringify(data, null, 2); // Store for debug display
+        
+        if (data.message === 'SERVER_READY') {
+          console.log('✅ Server is ready');
+        } else if (data.segments && data.segments.length > 0) {
+          console.log('📝 Transcription segments:', data.segments);
+          // Update transcript with latest segments
+          currentStreamTranscript = data.segments.map(s => s.text).join(' ');
+          console.log('Updated transcript:', currentStreamTranscript);
+        } else {
+          console.log('ℹ️ Message without segments:', data);
+        }
+      } catch (e) {
+        console.error('Error parsing WebSocket message:', e, 'Raw data:', event.data);
+        lastWSMessage = 'Parse error: ' + event.data;
+      }
+    };
+    
+    streamingWS.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      toast('Streaming connection error', 'error');
+      stopStreaming();
+    };
+    
+    streamingWS.onclose = () => {
+      console.log('WebSocket closed');
+      if (isStreaming) {
+        stopStreaming();
+      }
+    };
+  }
+
+  function stopStreaming() {
+    isStreaming = false;
+    
+    // Cleanup audio processor
+    if ((window as any).audioProcessor) {
+      (window as any).audioProcessor.disconnect();
+      (window as any).audioProcessor = null;
+    }
+    
+    if (streamRecorder) {
+      streamRecorder.stop();
+      streamRecorder.stream.getTracks().forEach(track => track.stop());
+      streamRecorder = null;
+    }
+    
+    if (streamAudioContext) {
+      streamAudioContext.close();
+      streamAudioContext = null;
+    }
+    
+    if (streamingWS) {
+      streamingWS.close();
+      streamingWS = null;
+    }
+    
+    toast('🛑 Streaming stopped', 'success');
+  }
+
+  async function saveStreamCorrection() {
+    if (!currentStreamTranscript.trim()) {
+      toast('No transcript to save', 'error');
+      return;
+    }
+    
+    const correctedText = prompt('Edit the transcription if needed:', currentStreamTranscript);
+    if (correctedText === null) return; // User cancelled
+    
+    try {
+      await post(`${BACKEND_URL}/corrections/save`, {
+        original_transcript: currentStreamTranscript,
+        corrected_transcript: correctedText
+      });
+      
+      toast('✅ Correction saved', 'success');
+      currentStreamTranscript = '';
+      await fetchWER();
+    } catch (e) {
+      toast('Failed to save correction', 'error');
+    }
+  }
+
   async function triggerManualRetrain() {
     if (trainingInProgress) return;
     trainingInProgress = true;
@@ -290,21 +547,32 @@
     load(); 
     loadAudioDevices();
     navigator.mediaDevices?.addEventListener('devicechange', loadAudioDevices);
+    if (!ENABLE_STREAMING) {
+      load(); 
+    }
     fetchWER();
-    fetchModelInfo();
-    fetchTrainingStatus();
+    if (ENABLE_TRAINING) {
+      fetchModelInfo();
+      fetchTrainingStatus();
+      setInterval(fetchModelInfo, WER_POLL_INTERVAL);
+      setInterval(fetchTrainingStatus, 5000);
+    }
     setInterval(fetchWER, WER_POLL_INTERVAL);
-    setInterval(fetchModelInfo, WER_POLL_INTERVAL); // Poll model info alongside WER
-    setInterval(fetchTrainingStatus, 5000); // Poll training status more frequently (every 5s)
+  });
+
+  onDestroy(() => {
+    if (isStreaming) {
+      stopStreaming();
+    }
   });
 
   const fmt=t=>t?.replace('T',' ').replace('Z','').slice(0,19);
 </script>
 
 <h1>ASR Annotation System</h1>
-<p class="subtitle">Transcription & Model Training</p>
+<p class="subtitle">{ENABLE_STREAMING ? 'Real-time Streaming & Corrections' : 'Transcription & Model Training'}</p>
 
-{#if modelInfo}
+{#if ENABLE_TRAINING && modelInfo}
   <div class="model-info-banner">
     <span class="model-name">🤖 Model: <strong>{modelInfo.base_model}</strong></span>
     <span class="model-status">
@@ -339,10 +607,90 @@
       <span class="status-indicator">⏳ Processing...</span>
     {/if}
   </div>
+  {#if ENABLE_STREAMING}
+    <!-- WhisperLive Streaming Mode -->
+    <div class="streaming-section">
+      <h3>🎙️ Live Streaming</h3>
+      
+      <!-- Input method selector -->
+      <div class="input-selector">
+        <label>
+          <input type="radio" bind:group={useRTSP} value={false} disabled={isStreaming} />
+          🎤 Microphone
+        </label>
+        <label>
+          <input type="radio" bind:group={useRTSP} value={true} disabled={isStreaming} />
+          🎥 RTSP Stream
+        </label>
+      </div>
+      
+      <!-- RTSP URL input -->
+      {#if useRTSP}
+        <div class="rtsp-input">
+          <input 
+            type="text" 
+            bind:value={rtspUrl} 
+            placeholder="rtsp://username:password@camera-ip:554/stream"
+            disabled={isStreaming}
+            class="rtsp-url-input"
+          />
+          <small class="hint">Example: rtsp://admin:password@192.168.1.100:554/stream1</small>
+        </div>
+      {/if}
+      
+      <button 
+        class="button stream-btn" 
+        class:streaming={isStreaming} 
+        on:click={toggleStreaming}
+        disabled={useRTSP && !rtspUrl.trim() && !isStreaming}
+      >
+        {isStreaming ? '⏹ Stop Streaming' : '▶️ Start Streaming'}
+      </button>
+      
+      {#if isStreaming}
+        <div class="streaming-status">
+          <strong>🎤 Streaming Active...</strong>
+          <p class="status-hint">Speak clearly into your microphone. Transcription will appear below.</p>
+        </div>
+      {/if}
+      
+      {#if lastWSMessage}
+        <details class="debug-section">
+          <summary>🔍 Debug: Last WebSocket Message</summary>
+          <pre>{lastWSMessage}</pre>
+        </details>
+      {/if}
+      
+      {#if currentStreamTranscript}
+        <div class="stream-transcript">
+          <strong>Current Transcript:</strong>
+          <p>{currentStreamTranscript}</p>
+          <button class="button save-btn" on:click={saveStreamCorrection}>
+            💾 Save & Correct
+          </button>
+        </div>
+      {/if}
+    </div>
+  {:else if ENABLE_BATCH_UPLOAD}
+    <!-- Batch Upload Mode -->
+    <div class="audio-section">
+      <h3>Audio Input</h3>
+      <button class="button record-btn" class:recording={isRecording} on:click={toggleRec} disabled={uploadProgress}>
+        {isRecording ? '⏹ Stop Recording' : '🎤 Start Recording'}
+      </button>
+      <label class="button upload-btn">
+        📁 Upload Audio
+        <input type="file" accept="audio/*" style="display:none" on:change={e=>sendToASR(e.target.files[0])} disabled={uploadProgress}/>
+      </label>
+      {#if uploadProgress}
+        <span class="status-indicator">⏳ Processing...</span>
+      {/if}
+    </div>
+  {/if}
 
   <div class="stats-section">
     <div class="stat-card">
-      <strong>Current WER</strong>
+      <strong>{ENABLE_STREAMING ? 'Average WER' : 'Current WER'}</strong>
       <div class="stat-value">{wer || '—'}</div>
     </div>
     <div class="stat-card">
@@ -366,11 +714,42 @@
       <small class="training-status">{trainingStatus.message}</small>
     {:else}
       <small>Calculate WER for benchmark, or retrain to improve the model</small>
+    {#if ENABLE_STREAMING && streamingStats}
+      <div class="stat-card">
+        <strong>Total Corrections</strong>
+        <div class="stat-value">{streamingStats.total_corrections || 0}</div>
+      </div>
+      <div class="stat-card">
+        <strong>Avg Characters</strong>
+        <div class="stat-value">{streamingStats.average_characters?.toFixed(0) || '—'}</div>
+      </div>
+    {:else}
+      <div class="stat-card">
+        <strong>Total Records</strong>
+        <div class="stat-value">{records.length}</div>
+      </div>
+      <div class="stat-card">
+        <strong>Reviewed</strong>
+        <div class="stat-value">{Object.values(reviewed).filter(Boolean).length}</div>
+      </div>
     {/if}
   </div>
+
+  {#if ENABLE_TRAINING}
+    <div class="training-section">
+      <button class="button train-btn" on:click={triggerManualRetrain} disabled={trainingInProgress}>
+        {trainingInProgress ? '⏳ Training...' : '🔄 Manual Retrain'}
+      </button>
+      {#if trainingInProgress && trainingStatus.message}
+        <small class="training-status">{trainingStatus.message}</small>
+      {:else}
+        <small>Auto-retrains after 20 corrections</small>
+      {/if}
+    </div>
+  {/if}
 </div>
 
-{#if trainingInProgress}
+{#if ENABLE_TRAINING && trainingInProgress}
   <div class="training-progress-banner">
     <div class="spinner-small"></div>
     <div class="training-info">
@@ -384,7 +763,8 @@
   </div>
 {/if}
 
-{#if loading}
+{#if !ENABLE_STREAMING}
+  {#if loading}
   <div class="loading-state">
     <div class="spinner"></div>
     <p>Loading records...</p>
@@ -448,6 +828,7 @@
       </tbody>
     </table>
   </div>
+  {/if}
 {/if}
 
 {#if showNotif}

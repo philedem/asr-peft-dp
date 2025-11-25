@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rtsp-transcription-api
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rtsp-transcription-api
+  template:
+    metadata:
+      labels:
+        app: rtsp-transcription-api
+    spec:
+      runtimeClassName: nvidia
+      imagePullSecrets:
+      - name: asr-peft-pull-secret
+      containers:
+      - name: api
+        image: intmidlaiercscr71ee46dc.azurecr.io/rtsp-transcription-api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          limits:
+            memory: "4Gi"
+            cpu: "4"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: "2Gi"
+            cpu: "2"
+            nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rtsp-transcription-api
+  namespace: default
+spec:
+  selector:
+    app: rtsp-transcription-api
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+    nodePort: 30002
+  type: NodePort

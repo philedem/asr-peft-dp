@@ -1,0 +1,30 @@
+FROM nvcr.io/nvidia/pytorch:25.09-py3
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y ffmpeg libsndfile1 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    pydantic \
+    "transformers<4.50" \
+    soundfile
+
+# Copy scripts
+COPY rtsp_api.py .
+COPY simple_rtsp_whisper.py .
+COPY rtsp_whisper_vad.py .
+COPY cache_models.py .
+
+# Pre-download and cache models
+RUN python cache_models.py
+
+EXPOSE 8000
+
+CMD ["python", "rtsp_api.py"]

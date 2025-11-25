@@ -23,6 +23,9 @@ requests
 soundfile
 librosa
 
+# WhisperLive for real-time transcription (commented out for now - will install separately)
+# git+https://github.com/collabora/WhisperLive.git
+
 # Data processing
 numpy
 pandas
