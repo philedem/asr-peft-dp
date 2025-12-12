@@ -142,19 +142,30 @@ def _get_training_status() -> dict:
     return {"status": "idle", "progress": 0, "message": "", "timestamp": None}
 
 
-def _split_long_chunks(chunks: List[AudioSegment], max_length_ms: int = 30000) -> List[AudioSegment]:
-    """Further split chunks longer than max_length_ms into smaller chunks."""
+def _split_long_chunks(chunks: List[AudioSegment], max_length_ms: int = 40000, overlap_ms: int = 2000) -> List[AudioSegment]:
+    """Further split chunks longer than max_length_ms into smaller chunks with overlap.
+    
+    Args:
+        chunks: List of audio segments to potentially split
+        max_length_ms: Maximum length of each chunk in milliseconds (default 40s)
+        overlap_ms: Overlap between consecutive chunks to avoid cutting words (default 2s)
+    """
     new_chunks = []
     for chunk in chunks:
         if len(chunk) <= max_length_ms:
             new_chunks.append(chunk)
         else:
-            # split into smaller chunks of max_length_ms with no overlap
+            # Split into smaller chunks with overlap to avoid cutting words at boundaries
             start = 0
             while start < len(chunk):
                 end = min(start + max_length_ms, len(chunk))
                 new_chunks.append(chunk[start:end])
-                start = end
+                # Move start forward by (max_length - overlap) to create overlap
+                # This ensures the last overlap_ms of this chunk is also in the next chunk
+                start = end - overlap_ms
+                # If we're very close to the end, just include the rest
+                if len(chunk) - start < overlap_ms:
+                    break
     return new_chunks
 
 
@@ -225,8 +236,8 @@ async def transcribe_endpoint(audio: UploadFile = File(...)):
             # If no silence detected, treat entire audio as one chunk
             chunks = [seg]
 
-        # split chunks > 30s
-        chunks = _split_long_chunks(chunks, max_length_ms=30000)
+        # split chunks > 40s with 2s overlap
+        chunks = _split_long_chunks(chunks, max_length_ms=40000, overlap_ms=2000)
 
         parent = uuid.uuid4().hex[:8]
         created: List[str] = []
