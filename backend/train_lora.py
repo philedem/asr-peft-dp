@@ -215,7 +215,8 @@ def train_with_dp(
         model, loader, lr=5e-5, epochs=3,
         target_epsilon=5.0, target_delta=1e-5,
         max_grad_norm=1.0,
-        device=None
+        device=None,
+        num_samples=None
 ):
     """
     Train model with optional differential privacy.
@@ -273,6 +274,10 @@ def train_with_dp(
         
         # Log loss per epoch to MLflow
         mlflow.log_metric("loss", avg_loss, step=ep+1)
+        
+        # Also log loss vs number of samples (for cross-run comparison)
+        if num_samples is not None:
+            mlflow.log_metric("loss_vs_samples", avg_loss, step=num_samples)
 
     # Return epsilon if DP is enabled, otherwise return None
     if ENABLE_DP:
@@ -420,6 +425,7 @@ try:
                 epochs=EPOCHS,
                 target_epsilon=eps,
                 max_grad_norm=MAX_GRAD_NORM,
+                num_samples=len(records)
             )
 
             if ENABLE_DP and final_eps is not None:
