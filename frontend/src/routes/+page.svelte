@@ -321,7 +321,7 @@
 <div class="control-panel">
   <div class="audio-section">
     <h3>Audio Input</h3>
-    {#if audioDevices.length > 1}
+    {#if audioDevices.length > 0}
       <select class="device-select" bind:value={selectedDeviceId} disabled={isRecording || uploadProgress}>
         {#each audioDevices as dev}
           <option value={dev.deviceId}>{dev.label || `Microphone ${audioDevices.indexOf(dev)+1}`}</option>
