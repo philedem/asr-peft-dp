@@ -72,7 +72,7 @@ persistence:
 # Ingress configuration
 ingress:
   enabled: true
-  enableBackend: false  # Backend uses NodePort instead
+  enableBackend: true
   className: traefik
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
@@ -92,6 +92,7 @@ ingress:
     - secretName: midlaier-tls
       hosts:
         - asr.192.168.3.155.nip.io
+        - asr-api.192.168.3.155.nip.io
 
-# Backend URL for frontend (uses NodePort instead of ingress)
-backendUrl: "http://192.168.3.155:30800"
+# Backend URL for frontend (HTTPS via ingress to avoid mixed-content blocking)
+backendUrl: "https://asr-api.192.168.3.155.nip.io"

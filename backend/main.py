@@ -1,8 +1,9 @@
 from __future__ import annotations
-import os, io, uuid, json, tempfile, asyncio, subprocess
+import os, io, uuid, json, tempfile, asyncio, subprocess, threading, time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, field
 
 import soundfile as sf
 import numpy as np
@@ -74,10 +75,29 @@ def _attach_lora(base) -> WhisperForConditionalGeneration:
         print(f"No complete LoRA adapter found in {ADAPTER_DIR}, using base model.")
     return base
 
+# Minimum RMS energy to consider audio as speech (not silence)
+SPEECH_RMS_THRESHOLD = 0.01
+
+def _has_speech(path: Path, threshold: float = SPEECH_RMS_THRESHOLD) -> bool:
+    """Return True if the audio file contains enough energy to be speech."""
+    try:
+        audio, sr = sf.read(str(path), dtype="float32")
+        if len(audio) == 0:
+            return False
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        return rms >= threshold
+    except Exception:
+        return True  # if we can't read it, let Whisper try
+
+
 def _transcribe_wav(path: Path) -> str:
     """Whisper inference using transformers with LoRA support."""
     try:
-        # Use the ASR pipeline with the model that has LoRA loaded
+        # Reject silent audio to prevent hallucinations
+        if not _has_speech(path):
+            print(f"Skipping {path.name}: below speech energy threshold")
+            return ""
+
         result = asr_pipeline(str(path), generate_kwargs={"language": "norwegian", "task": "transcribe"})
         return result["text"].strip()
         
@@ -250,6 +270,11 @@ async def transcribe_endpoint(audio: UploadFile = File(...)):
 
             async with MODEL_LOCK:
                 asr_text = _transcribe_wav(wav_path)
+
+            if not asr_text:
+                # Silent chunk — remove the wav and skip
+                wav_path.unlink(missing_ok=True)
+                continue
 
             rec = _new_record_dict(wav_path.name, asr_text)
             async with RECORD_LOCK:
@@ -464,3 +489,192 @@ async def reload_adapter():
         base = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL).to(DEVICE)
         model = _attach_lora(base)
     return {"status": "reloaded"}
+
+
+# ═══════════════════════════ 5. RTSP streaming with VAD ═══════════════════
+
+SAMPLE_RATE = 16000
+
+@dataclass
+class _StreamingState:
+    is_running: bool = False
+    rtsp_url: str = ""
+    process: Optional[subprocess.Popen] = None
+    thread: Optional[threading.Thread] = None
+    segments_created: int = 0
+    start_time: float = 0.0
+    error: str = ""
+
+_stream = _StreamingState()
+_stream_lock = threading.Lock()
+
+
+def _calculate_rms(audio: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(audio ** 2)))
+
+
+def _detect_silence_at_end(audio: np.ndarray, sr: int,
+                           threshold: float, min_dur: float) -> bool:
+    """Return True if trailing silence >= min_dur seconds."""
+    window = int(sr * 0.1)  # 100 ms windows
+    n_windows = len(audio) // window
+    if n_windows == 0:
+        return False
+    silent_windows = 0
+    for i in range(n_windows - 1, -1, -1):
+        chunk = audio[i * window:(i + 1) * window]
+        if _calculate_rms(chunk) < threshold:
+            silent_windows += 1
+        else:
+            break
+    return silent_windows * 0.1 >= min_dur
+
+
+def _stream_capture_loop(state: _StreamingState,
+                         segment_dur: int,
+                         silence_dur: float,
+                         silence_thresh: float) -> None:
+    """Background thread: read PCM from ffmpeg, detect silence, transcribe."""
+    try:
+        cmd = [
+            "ffmpeg", "-i", state.rtsp_url,
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ar", str(SAMPLE_RATE), "-ac", "1",
+            "-loglevel", "error",
+            "-",
+        ]
+        state.process = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE)
+        bytes_per_sec = SAMPLE_RATE * 2  # 16-bit mono
+        chunk_bytes = bytes_per_sec      # 1-second reads
+
+        audio_buf: list[np.ndarray] = []
+        seg_start = time.time()
+
+        while state.is_running:
+            raw = state.process.stdout.read(chunk_bytes)
+            if not raw:
+                break
+
+            pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            audio_buf.append(pcm)
+            elapsed = time.time() - seg_start
+
+            # Check for silence trigger (after at least 2s of audio)
+            trigger = False
+            if elapsed >= 2.0:
+                full = np.concatenate(audio_buf)
+                if _detect_silence_at_end(full, SAMPLE_RATE,
+                                          silence_thresh, silence_dur):
+                    trigger = True
+
+            if elapsed >= segment_dur:
+                trigger = True
+
+            if trigger and audio_buf:
+                full = np.concatenate(audio_buf)
+                audio_buf = []
+                seg_start = time.time()
+
+                # Write WAV and transcribe
+                seg_id = str(uuid.uuid4())[:8] + f"_rtsp_{state.segments_created}"
+                wav_path = AUDIO_DIR / f"{seg_id}.wav"
+                sf.write(str(wav_path), full, SAMPLE_RATE)
+
+                # Transcribe (blocks until MODEL_LOCK available)
+                loop = asyncio.new_event_loop()
+                try:
+                    asr_text = loop.run_until_complete(_transcribe_with_lock(wav_path))
+                finally:
+                    loop.close()
+
+                if not asr_text:
+                    # Silent segment — discard
+                    wav_path.unlink(missing_ok=True)
+                    continue
+
+                rec = _new_record_dict(wav_path.name, asr_text)
+                _atomic_json_write(RECORD_DIR / f"{seg_id}.json", rec)
+                state.segments_created += 1
+                print(f"[stream] segment #{state.segments_created}: "
+                      f"{asr_text[:80]}...")
+
+    except Exception as e:
+        state.error = str(e)
+        print(f"[stream] error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if state.process:
+            state.process.terminate()
+            try:
+                state.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                state.process.kill()
+            state.process = None
+        state.is_running = False
+        print(f"[stream] stopped. {state.segments_created} segments created.")
+
+
+async def _transcribe_with_lock(wav_path: Path) -> str:
+    async with MODEL_LOCK:
+        return _transcribe_wav(wav_path)
+
+
+@app.post("/stream/start")
+async def stream_start(req: Request):
+    body = await req.json()
+    rtsp_url = body.get("rtsp_url", "").strip()
+    if not rtsp_url:
+        return JSONResponse({"error": "rtsp_url required"}, status_code=400)
+
+    with _stream_lock:
+        if _stream.is_running:
+            return JSONResponse({"error": "Stream already running"}, status_code=409)
+
+        _stream.is_running = True
+        _stream.rtsp_url = rtsp_url
+        _stream.segments_created = 0
+        _stream.start_time = time.time()
+        _stream.error = ""
+
+        seg_dur = int(body.get("segment_duration", 10))
+        sil_dur = float(body.get("silence_duration", 2.0))
+        sil_thresh = float(body.get("silence_threshold", 0.02))
+
+        t = threading.Thread(
+            target=_stream_capture_loop,
+            args=(_stream, seg_dur, sil_dur, sil_thresh),
+            daemon=True,
+        )
+        _stream.thread = t
+        t.start()
+
+    return {"status": "started", "rtsp_url": rtsp_url}
+
+
+@app.post("/stream/stop")
+async def stream_stop():
+    with _stream_lock:
+        if not _stream.is_running:
+            return JSONResponse({"error": "No stream running"}, status_code=400)
+        _stream.is_running = False
+
+    # Wait for thread to finish (non-blocking for the lock)
+    if _stream.thread:
+        _stream.thread.join(timeout=10)
+        _stream.thread = None
+
+    return {"status": "stopped", "segments_created": _stream.segments_created}
+
+
+@app.get("/stream/status")
+async def stream_status():
+    elapsed = time.time() - _stream.start_time if _stream.is_running else 0
+    return {
+        "is_running": _stream.is_running,
+        "rtsp_url": _stream.rtsp_url,
+        "segments_created": _stream.segments_created,
+        "elapsed_time": round(elapsed, 1),
+        "error": _stream.error,
+    }

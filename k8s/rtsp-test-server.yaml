@@ -1,25 +1,22 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: rtsp-test-audio
-  namespace: default
-data:
-  # Simple script to generate a test audio stream
-  stream.sh: |
-    #!/bin/sh
-    echo "Generating test audio stream..."
-    # Generate a simple sine wave audio (beep pattern) as test content
-    ffmpeg -re -f lavfi -i "sine=frequency=440:duration=10" \
-      -stream_loop -1 \
-      -c:a aac -b:a 128k -ar 44100 -ac 2 \
-      -f rtsp -rtsp_transport tcp \
-      rtsp://localhost:8554/test-stream
----
+# RTSP test server for ASR pipeline testing.
+#
+# Two containers in one pod:
+#   mediamtx  — lightweight RTSP server (bluenviron/mediamtx)
+#   publisher — ffmpeg generating an alternating tone/silence stream
+#               (4s of 440Hz tone, 4s silence, repeating)
+#               This exercises the VAD: speech windows trigger transcription,
+#               silence windows are skipped.
+#
+# In-cluster RTSP URL:  rtsp://rtsp-test-server:8554/stream
+# External RTSP URL:    rtsp://<node-ip>:30854/stream
+#
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rtsp-test-server
   namespace: default
+  labels:
+    app: rtsp-test-server
 spec:
   replicas: 1
   selector:
@@ -31,43 +28,48 @@ spec:
         app: rtsp-test-server
     spec:
       containers:
-      # RTSP Server
-      - name: rtsp-server
+      - name: mediamtx
         image: bluenviron/mediamtx:latest
         ports:
         - containerPort: 8554
           name: rtsp
-        - containerPort: 8888
-          name: webrtc
+        env:
+        - name: MTX_LOGLEVEL
+          value: "warn"
         resources:
           requests:
-            memory: "128Mi"
-            cpu: "100m"
+            memory: "64Mi"
+            cpu: "50m"
           limits:
-            memory: "256Mi"
-            cpu: "500m"
-      # FFmpeg publisher (publishes test audio to the RTSP server)
-      - name: ffmpeg-publisher
-        image: linuxserver/ffmpeg:latest
+            memory: "128Mi"
+            cpu: "200m"
+
+      - name: publisher
+        image: alpine:3.19
         command: ["/bin/sh", "-c"]
         args:
           - |
-            echo "Waiting for RTSP server to be ready..."
-            sleep 5
-            echo "Starting test audio stream..."
-            # Generate a continuous sine wave (beep) audio stream
+            apk add --no-cache ffmpeg
+            echo "Waiting for mediamtx to start..."
+            sleep 4
+            echo "Starting RTSP publisher..."
             while true; do
-              ffmpeg -re -f lavfi -i "sine=frequency=440:duration=30" \
-                -c:a aac -b:a 128k -ar 44100 -ac 2 \
-                -f rtsp -rtsp_transport tcp \
-                rtsp://localhost:8554/test-stream || sleep 2
+              ffmpeg -hide_banner -loglevel warning \
+                -re \
+                -f lavfi \
+                -i "aevalsrc=if(mod(floor(t/4)\,2)\,sin(2*PI*440*t)*0.3+sin(2*PI*880*t)*0.15\,0):s=16000:c=mono" \
+                -c:a aac -b:a 64k -ar 16000 -ac 1 \
+                -f rtsp \
+                rtsp://localhost:8554/stream
+              echo "Publisher exited, restarting in 2s..."
+              sleep 2
             done
         resources:
           requests:
-            memory: "128Mi"
+            memory: "64Mi"
             cpu: "100m"
           limits:
-            memory: "256Mi"
+            memory: "128Mi"
             cpu: "500m"
 ---
 apiVersion: v1
@@ -76,16 +78,12 @@ metadata:
   name: rtsp-test-server
   namespace: default
 spec:
-  type: LoadBalancer
-  loadBalancerIP: 192.168.3.155
+  type: NodePort
   selector:
     app: rtsp-test-server
   ports:
-  - port: 8554
+  - name: rtsp
+    port: 8554
     targetPort: 8554
+    nodePort: 30854
     protocol: TCP
-    name: rtsp
-  - port: 8888
-    targetPort: 8888
-    protocol: TCP
-    name: webrtc

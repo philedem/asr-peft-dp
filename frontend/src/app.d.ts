@@ -6,10 +6,7 @@
 interface ImportMetaEnv {
 	readonly VITE_BACKEND_URL?: string;
 	readonly VITE_WER_POLL_INTERVAL?: string;
-	readonly VITE_WHISPERLIVE_WS_URL?: string;
-	readonly VITE_ENABLE_TRAINING?: string;
-	readonly VITE_ENABLE_STREAMING?: string;
-	readonly VITE_ENABLE_BATCH_UPLOAD?: string;
+	readonly VITE_AUDIO_INPUTS?: string;
 }
 
 interface ImportMeta {
