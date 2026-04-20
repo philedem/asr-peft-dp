@@ -205,7 +205,8 @@ asr_pipeline = pipeline(
     device=DEVICE,
 )
 
-MODEL_LOCK = asyncio.Lock()  # serialise GPU access
+MODEL_LOCK  = asyncio.Lock()  # serialise GPU access
+RECORD_LOCK = asyncio.Lock()  # serialise record read-modify-write
 print(f"✓ Model loaded on {DEVICE} with LoRA adapter (if available)")
 
 # ───────── 1. receive stream/blob -> chunk -> transcribe ──────────
@@ -251,7 +252,8 @@ async def transcribe_endpoint(audio: UploadFile = File(...)):
                 asr_text = _transcribe_wav(wav_path)
 
             rec = _new_record_dict(wav_path.name, asr_text)
-            _atomic_json_write(RECORD_DIR / f"{chunk_id}.json", rec)
+            async with RECORD_LOCK:
+                _atomic_json_write(RECORD_DIR / f"{chunk_id}.json", rec)
             created.append(chunk_id)
 
         os.remove(tmp_path)
@@ -276,33 +278,34 @@ async def save_record(req: Request):
         file_stem = Path(body["audio_id"]).stem    # strip .wav if present
         json_path = RECORD_DIR / f"{file_stem}.json"
 
-        # load existing (to keep timestamp)
-        record: Dict[str, Any]
-        if json_path.exists():
-            try:
-                record = json.loads(json_path.read_text())
-            except json.JSONDecodeError:
-                return JSONResponse({"error": "Corrupt record file"}, status_code=500)
-        else:
-            record = _new_record_dict(f"{file_stem}.wav", body.get("asr_transcript", ""))
+        async with RECORD_LOCK:
+            # load existing (to keep timestamp)
+            record: Dict[str, Any]
+            if json_path.exists():
+                try:
+                    record = json.loads(json_path.read_text())
+                except json.JSONDecodeError:
+                    return JSONResponse({"error": "Corrupt record file"}, status_code=500)
+            else:
+                record = _new_record_dict(f"{file_stem}.wav", body.get("asr_transcript", ""))
 
-        # update fields
-        record["asr_transcript"]    = body.get("asr_transcript",    record["asr_transcript"])
-        record["manual_transcript"] = body.get("manual_transcript", record["manual_transcript"])
+            # update fields
+            record["asr_transcript"]    = body.get("asr_transcript",    record["asr_transcript"])
+            record["manual_transcript"] = body.get("manual_transcript", record["manual_transcript"])
 
-        _atomic_json_write(json_path, record)
+            _atomic_json_write(json_path, record)
 
-        # if reviewed -> bump counter
-        if record["manual_transcript"] and record["manual_transcript"] != record["asr_transcript"]:
-            reviews = _increment_review_counter()
-            print(f"Manual reviews since last retrain: {reviews}")
-            if AUTO_RETRAIN_ENABLED and reviews >= MANUAL_RETRAIN_N:
-                print("Threshold reached – launching LoRA fine-tune ...")
-                _set_training_status("running", 0, "Auto-training started (20 corrections reached)")
-                subprocess.Popen(["/usr/bin/python3.12", "train_lora.py"])
-                _reset_review_counter()
-            elif not AUTO_RETRAIN_ENABLED:
-                print("Auto-retraining is disabled. Use manual retrain button to start training.")
+            # if reviewed -> bump counter
+            if record["manual_transcript"] and record["manual_transcript"] != record["asr_transcript"]:
+                reviews = _increment_review_counter()
+                print(f"Manual reviews since last retrain: {reviews}")
+                if AUTO_RETRAIN_ENABLED and reviews >= MANUAL_RETRAIN_N:
+                    print("Threshold reached – launching LoRA fine-tune ...")
+                    _set_training_status("running", 0, "Auto-training started (20 corrections reached)")
+                    subprocess.Popen(["/usr/bin/python3.12", "train_lora.py"])
+                    _reset_review_counter()
+                elif not AUTO_RETRAIN_ENABLED:
+                    print("Auto-retraining is disabled. Use manual retrain button to start training.")
 
         return {"ok": True}
     
@@ -441,7 +444,12 @@ def get_training_status():
 
 @app.get("/audio/{fname}")
 def serve_audio(fname: str):
-    path = AUDIO_DIR / fname
+    # Guard against path traversal
+    if ".." in fname or "/" in fname or "\\" in fname:
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+    path = (AUDIO_DIR / fname).resolve()
+    if not path.parent == AUDIO_DIR.resolve():
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
     if not path.exists():
         return JSONResponse({"error": "audio not found"}, status_code=404)
     return FileResponse(path)
