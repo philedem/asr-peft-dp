@@ -16,6 +16,8 @@
   let isRecording=false, chunks:Blob[]=[], recorder:MediaRecorder|null=null;
   let uploadProgress=false;
   let trainingInProgress=false;
+  let audioDevices:MediaDeviceInfo[]=[];
+  let selectedDeviceId:string='';
 
   const toast=(m:string,t='success')=>{
     notification=m; notifType=t; showNotif=true;
@@ -155,12 +157,32 @@
     }
   }
 
+  // ---------- audio device enumeration ----------
+  async function loadAudioDevices(){
+    try {
+      // Request permission first so labels are populated
+      const tempStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      tempStream.getTracks().forEach(t=>t.stop());
+      const devices=await navigator.mediaDevices.enumerateDevices();
+      audioDevices=devices.filter(d=>d.kind==='audioinput');
+      // Keep current selection if still valid, otherwise pick default
+      if(!selectedDeviceId || !audioDevices.find(d=>d.deviceId===selectedDeviceId)){
+        selectedDeviceId=audioDevices[0]?.deviceId||'';
+      }
+    } catch(e){
+      console.error('Could not enumerate audio devices:',e);
+    }
+  }
+
   // ---------- recording ----------
   async function toggleRec(){
     if(!isRecording){
       try {
         chunks=[]; isRecording=true;
-        const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+        const audioConstraints = selectedDeviceId
+          ? { deviceId: { exact: selectedDeviceId } }
+          : {};
+        const stream=await navigator.mediaDevices.getUserMedia({audio:audioConstraints});
         recorder=new MediaRecorder(stream);
         recorder.ondataavailable=e=>chunks.push(e.data);
         recorder.onstop=async ()=>{
@@ -266,6 +288,8 @@
 
   onMount(()=>{ 
     load(); 
+    loadAudioDevices();
+    navigator.mediaDevices?.addEventListener('devicechange', loadAudioDevices);
     fetchWER();
     fetchModelInfo();
     fetchTrainingStatus();
@@ -297,6 +321,13 @@
 <div class="control-panel">
   <div class="audio-section">
     <h3>Audio Input</h3>
+    {#if audioDevices.length > 1}
+      <select class="device-select" bind:value={selectedDeviceId} disabled={isRecording || uploadProgress}>
+        {#each audioDevices as dev}
+          <option value={dev.deviceId}>{dev.label || `Microphone ${audioDevices.indexOf(dev)+1}`}</option>
+        {/each}
+      </select>
+    {/if}
     <button class="button record-btn" class:recording={isRecording} on:click={toggleRec} disabled={uploadProgress}>
       {isRecording ? '⏹ Stop Recording' : '🎤 Start Recording'}
     </button>
