@@ -14,6 +14,7 @@ WORKDIR /workspace
 # Install ML dependencies following NVIDIA's playbook recommendations
 # Using specific versions known to work with GB10
 RUN pip install --no-cache-dir \
+    "torchao>=0.16.0" \
     transformers \
     peft \
     datasets \
