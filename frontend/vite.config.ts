@@ -8,6 +8,7 @@ export default defineConfig({
 		allowedHosts: [
 			'asr.192.168.3.155.nip.io',
 			'asr.midlaier.local',
+			'.cisk.unclassified.mil.no',
 			'.local',
 			'.nip.io',
 			'localhost'
